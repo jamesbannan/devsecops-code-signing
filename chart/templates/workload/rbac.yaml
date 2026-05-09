@@ -1,0 +1,68 @@
+{{- if .Values.workload.enabled }}
+---
+# ClusterRole: read step-ca-root ConfigMap from the pki namespace.
+# A ClusterRole is required because the signing-sa ServiceAccount lives in
+# the 'workload' namespace but needs to read resources in 'pki'.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Name }}-signing-sa-pki-reader
+  labels:
+    {{- include "devsecops-demo.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["step-ca-root"]
+    verbs: ["get"]
+    # Scoped to the specific ConfigMap name — no broader access needed.
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Name }}-signing-sa-pki-reader
+  labels:
+    {{- include "devsecops-demo.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: signing-sa
+    namespace: {{ include "devsecops-demo.workloadNamespace" . }}
+roleRef:
+  kind: ClusterRole
+  name: {{ .Release.Name }}-signing-sa-pki-reader
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Role: verification-sa can read configmaps and list jobs in workload namespace
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: verification-sa-reader
+  namespace: {{ include "devsecops-demo.workloadNamespace" . }}
+  labels:
+    {{- include "devsecops-demo.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: verification-sa-reader
+  namespace: {{ include "devsecops-demo.workloadNamespace" . }}
+  labels:
+    {{- include "devsecops-demo.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: verification-sa
+    namespace: {{ include "devsecops-demo.workloadNamespace" . }}
+roleRef:
+  kind: Role
+  name: verification-sa-reader
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

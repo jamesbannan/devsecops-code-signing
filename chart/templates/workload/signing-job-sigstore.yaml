@@ -1,0 +1,110 @@
+{{- if and .Values.workload.enabled .Values.workload.signing.sigstore.enabled .Values.sigstore.enabled }}
+---
+# signing-job-sigstore — signs the demo image using Sigstore keyless signing.
+#
+# Flow:
+#   1. A projected ServiceAccount token (audience: "sigstore") is mounted as the
+#      OIDC identity token.
+#   2. cosign initialize bootstraps trust from the local TUF mirror.
+#   3. cosign sign uses Fulcio to issue an ephemeral cert tied to the SA identity,
+#      records the signing event in Rekor, and pushes the signature to the registry.
+#
+# The OIDC issuer must be https://kubernetes.default.svc — this requires
+# minikube to be started with:
+#   --extra-config=apiserver.service-account-issuer=https://kubernetes.default.svc
+# See scripts/start-minikube.sh.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: signing-job-sigstore
+  namespace: {{ include "devsecops-demo.workloadNamespace" . }}
+  labels:
+    {{- include "devsecops-demo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: signing-sigstore
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: signing-job-sigstore
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      serviceAccountName: signing-sa
+      restartPolicy: Never
+
+      volumes:
+        # Projected SA token with audience "sigstore" — used as OIDC identity token
+        - name: sigstore-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: "sigstore"
+                  expirationSeconds: 600
+                  path: token
+        # Writable home dir for cosign TUF cache
+        - name: cosign-home
+          emptyDir: {}
+
+      containers:
+        - name: cosign-keyless
+          image: {{ include "devsecops-demo.cosignImage" . }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          envFrom:
+            - configMapRef:
+                name: sigstore-env
+          env:
+            - name: HOME
+              value: /cosign-home
+            - name: IMAGE
+              value: "{{ include "devsecops-demo.demoImage" . }}"
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -euo pipefail
+
+              echo "=== Initializing cosign TUF trust root ==="
+              echo "TUF mirror: $TUF_MIRROR"
+              cosign initialize \
+                --mirror "$TUF_MIRROR" \
+                --root "$TUF_MIRROR/root.json"
+
+              echo ""
+              echo "=== Keyless signing: $IMAGE ==="
+              echo "Fulcio URL: $FULCIO_URL"
+              echo "Rekor URL:  $REKOR_URL"
+              echo "OIDC token: $(cat /var/run/sigstore/token | cut -d. -f2 | base64 -d 2>/dev/null | head -c 200 || echo '<token present>')"
+
+              cosign sign \
+                --fulcio-url "$FULCIO_URL" \
+                --rekor-url "$REKOR_URL" \
+                --identity-token "$(cat /var/run/sigstore/token)" \
+                {{ include "devsecops-demo.registryInsecureFlag" . }} \
+                --yes \
+                "$IMAGE"
+
+              echo ""
+              echo "=== Signature details ==="
+              cosign triangulate \
+                {{ include "devsecops-demo.registryInsecureFlag" . }} \
+                "$IMAGE" || true
+
+              echo ""
+              echo "=== Rekor log entry ==="
+              # Show the Rekor log index from the most recent signing event
+              cosign verify \
+                --rekor-url "$REKOR_URL" \
+                --certificate-identity-regexp ".*" \
+                --certificate-oidc-issuer "https://kubernetes.default.svc" \
+                {{ include "devsecops-demo.registryInsecureFlag" . }} \
+                "$IMAGE" 2>&1 | grep -E "(log index|entry)" || true
+
+              echo ""
+              echo "Sigstore keyless signing complete."
+          volumeMounts:
+            - name: sigstore-token
+              mountPath: /var/run/sigstore
+              readOnly: true
+            - name: cosign-home
+              mountPath: /cosign-home
+{{- end }}

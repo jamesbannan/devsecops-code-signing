@@ -1,0 +1,199 @@
+{{- if .Values.stepca.enabled }}
+---
+# stepca-codesigning-config — post-install hook that patches the step-ca
+# provisioner to issue certificates with the Code Signing EKU.
+#
+# By default, step-ca's bootstrap job creates a JWK provisioner that issues
+# TLS certificates (Server Auth + Client Auth EKU). cosign v3 requires the
+# Code Signing EKU for image signing. This hook patches the ca.json ConfigMap
+# to add an x509 template with codeSigning EKU and allows short cert durations
+# (30s minimum) for live demo purposes. After patching, it restarts the
+# step-ca StatefulSet to pick up the new config.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-stepca-codesigning-config
+  namespace: {{ include "devsecops-demo.pkiNamespace" . }}
+  labels:
+    {{- include "devsecops-demo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: stepca-config
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: stepca-codesigning-config
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      serviceAccountName: {{ .Release.Name }}-stepca-config-patcher
+      restartPolicy: Never
+      volumes:
+        - name: patch-script
+          configMap:
+            name: {{ .Release.Name }}-stepca-patch-script
+      containers:
+        - name: patch-config
+          image: python:3-alpine
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          env:
+            - name: CONFIG_CM
+              value: "{{ .Release.Name }}-stepca-config"
+            - name: STATEFULSET
+              value: "{{ .Release.Name }}-stepca"
+            - name: NAMESPACE
+              value: "{{ include "devsecops-demo.pkiNamespace" . }}"
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -euo pipefail
+
+              # Install kubectl
+              apk add --no-cache curl >/dev/null 2>&1
+              ARCH=$(uname -m | sed 's/aarch64/arm64/;s/x86_64/amd64/')
+              KVER=$(curl -sL https://dl.k8s.io/release/stable.txt)
+              curl -sLO "https://dl.k8s.io/release/${KVER}/bin/linux/${ARCH}/kubectl"
+              chmod +x kubectl && mv kubectl /usr/local/bin/
+
+              echo "Patching step-ca config for code signing EKU ..."
+
+              # Wait for the ConfigMap to exist (bootstrap job creates it)
+              for i in $(seq 1 30); do
+                if kubectl get configmap "$CONFIG_CM" -n "$NAMESPACE" >/dev/null 2>&1; then
+                  echo "ConfigMap $CONFIG_CM found"
+                  break
+                fi
+                echo "Waiting for ConfigMap $CONFIG_CM ... ($i/30)"
+                sleep 5
+              done
+
+              # Extract ca.json
+              CA_JSON=$(kubectl get configmap "$CONFIG_CM" -n "$NAMESPACE" \
+                -o jsonpath='{.data.ca\.json}')
+
+              if echo "$CA_JSON" | grep -q '"codeSigning"'; then
+                echo "Code signing template already configured — skipping"
+                exit 0
+              fi
+
+              # Patch using the Python script from the ConfigMap
+              PATCHED=$(echo "$CA_JSON" | python3 /scripts/patch-ca-config.py)
+
+              # Apply the patched config
+              kubectl create configmap "$CONFIG_CM" -n "$NAMESPACE" \
+                --from-literal="ca.json=$PATCHED" \
+                --dry-run=client -o yaml | kubectl apply -f -
+
+              echo "ConfigMap patched successfully"
+
+              # Restart step-ca to pick up new config
+              echo "Restarting step-ca StatefulSet ..."
+              kubectl rollout restart statefulset "$STATEFULSET" -n "$NAMESPACE"
+              kubectl rollout status statefulset "$STATEFULSET" -n "$NAMESPACE" --timeout=120s
+
+              echo "step-ca restarted with code signing configuration"
+          volumeMounts:
+            - name: patch-script
+              mountPath: /scripts
+              readOnly: true
+---
+# ConfigMap containing the Python patch script — avoids Go/Helm template
+# escaping issues with the step-ca x509 template syntax.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-stepca-patch-script
+  namespace: {{ include "devsecops-demo.pkiNamespace" . }}
+  labels:
+    {{- include "devsecops-demo.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+data:
+  patch-ca-config.py: |
+    #!/usr/bin/env python3
+    """Patch step-ca ca.json to add code signing EKU template."""
+    import sys, json
+
+    ca = json.load(sys.stdin)
+
+    # step-ca x509 template using Go template syntax (processed by step-ca, not Helm)
+    CODESIGN_TEMPLATE = (
+        '{\n'
+        '  "subject": {' + '{ toJson .Subject }' + '},\n'
+        '  "sans": {' + '{ toJson .SANs }' + '},\n'
+        '  "keyUsage": ["digitalSignature"],\n'
+        '  "extKeyUsage": ["codeSigning"]\n'
+        '}'
+    )
+
+    for prov in ca.get("authority", {}).get("provisioners", []):
+        prov["options"] = prov.get("options", {})
+        prov["options"]["x509"] = {
+            "templateData": {},
+            "templateFile": "",
+            "template": CODESIGN_TEMPLATE,
+        }
+        prov["claims"] = prov.get("claims", {})
+        prov["claims"]["minTLSCertDuration"] = "30s"
+        prov["claims"]["defaultTLSCertDuration"] = "5m"
+
+    print(json.dumps(ca, indent=2))
+---
+# ServiceAccount and RBAC for the config patcher hook
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Release.Name }}-stepca-config-patcher
+  namespace: {{ include "devsecops-demo.pkiNamespace" . }}
+  labels:
+    {{- include "devsecops-demo.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}-stepca-config-patcher
+  namespace: {{ include "devsecops-demo.pkiNamespace" . }}
+  labels:
+    {{- include "devsecops-demo.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "patch", "update", "create"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}-stepca-config-patcher
+  namespace: {{ include "devsecops-demo.pkiNamespace" . }}
+  labels:
+    {{- include "devsecops-demo.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}-stepca-config-patcher
+    namespace: {{ include "devsecops-demo.pkiNamespace" . }}
+roleRef:
+  kind: Role
+  name: {{ .Release.Name }}-stepca-config-patcher
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

@@ -1,0 +1,12 @@
+dependencies:
+- name: scaffold
+  repository: https://sigstore.github.io/helm-charts
+  version: 0.6.103
+- name: kyverno
+  repository: https://kyverno.github.io/kyverno/
+  version: 3.5.3
+- name: step-certificates
+  repository: https://smallstep.github.io/helm-charts
+  version: 1.30.1
+digest: sha256:ee494eea01a61da756f5ce502e376a76a9e4b3cc42214bf6b84bdb7a9506f57c
+generated: "2026-04-03T21:20:39.725822+11:00"

@@ -1,0 +1,165 @@
+{{- if and .Values.workload.enabled .Values.workload.signing.smallstep.enabled }}
+---
+# signing-job-smallstep — signs the demo image using a Smallstep CA-issued cert.
+#
+# Flow:
+#   initContainer (step-cli): Request a 5-minute code signing cert from step-ca
+#     using the JWK provisioner (workload-signer) with the provisioner password.
+#     Writes cert+key to a shared emptyDir volume.
+#   main container (cosign): Signs the image using the cert+key+chain.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: signing-job-smallstep
+  namespace: {{ include "devsecops-demo.workloadNamespace" . }}
+  labels:
+    {{- include "devsecops-demo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: signing-smallstep
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: signing-job-smallstep
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      serviceAccountName: signing-sa
+      restartPolicy: Never
+
+      volumes:
+        # Shared volume for the signing cert and key between initContainer and main container
+        - name: signing-certs
+          emptyDir: {}
+        # step-ca root CA cert — needed by step-cli to verify the CA and by cosign as chain
+        - name: step-ca-root
+          configMap:
+            name: step-ca-root
+        # Intermediate CA cert — needed for the certificate chain
+        - name: step-ca-certs
+          configMap:
+            name: {{ .Release.Name }}-stepca-certs
+        # Writable home dir for cosign TUF cache
+        - name: cosign-home
+          emptyDir: {}
+        # Provisioner password for the JWK provisioner
+        - name: provisioner-password
+          secret:
+            secretName: {{ .Release.Name }}-stepca-provisioner-password
+
+      initContainers:
+        # Request a short-lived code signing certificate from step-ca using JWK provisioner
+        - name: get-signing-cert
+          image: {{ include "devsecops-demo.stepCliImage" . }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -euo pipefail
+
+              STEP_CA_URL="https://{{ .Release.Name }}-stepca.{{ include "devsecops-demo.pkiNamespace" . }}.svc.cluster.local:9000"
+              ROOT_CERT="/var/run/step-ca-root/root_ca.crt"
+              PASSWORD_FILE="/var/run/provisioner-password/password"
+
+              echo "Requesting code signing certificate from step-ca at: $STEP_CA_URL"
+
+              # Request a 5-minute certificate using the JWK provisioner
+              step ca certificate "signing-key" \
+                /signing/cert.pem /signing/key.pem \
+                --ca-url "$STEP_CA_URL" \
+                --root "$ROOT_CERT" \
+                --provisioner "workload-signer" \
+                --provisioner-password-file "$PASSWORD_FILE" \
+                --san "signing@demo.local" \
+                --not-after "5m" \
+                --force
+
+              # Build certificate chain (intermediate + root)
+              cat /var/run/step-ca-certs/intermediate_ca.crt \
+                  /var/run/step-ca-root/root_ca.crt \
+                  > /signing/chain.pem
+
+              echo "Certificate issued:"
+              step certificate inspect /signing/cert.pem --short
+
+              echo "Certificate fingerprint (SHA-256):"
+              step certificate fingerprint /signing/cert.pem
+
+              echo "Certificate expiry:"
+              step certificate inspect /signing/cert.pem --format json | \
+                grep -o '"notAfter":"[^"]*"' || \
+                openssl x509 -in /signing/cert.pem -noout -enddate
+          volumeMounts:
+            - name: signing-certs
+              mountPath: /signing
+            - name: step-ca-root
+              mountPath: /var/run/step-ca-root
+              readOnly: true
+            - name: step-ca-certs
+              mountPath: /var/run/step-ca-certs
+              readOnly: true
+            - name: provisioner-password
+              mountPath: /var/run/provisioner-password
+              readOnly: true
+
+      containers:
+        # Sign the demo image using the ephemeral cert from step-ca
+        - name: cosign-sign
+          image: {{ include "devsecops-demo.cosignImage" . }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          env:
+            - name: HOME
+              value: /cosign-home
+            - name: IMAGE
+              value: "{{ include "devsecops-demo.demoImage" . }}"
+            - name: COSIGN_PASSWORD
+              value: ""
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -euo pipefail
+
+              echo "Signing image: $IMAGE"
+              echo "Using code signing certificate from Smallstep CA"
+
+              # Import the key to cosign format
+              cosign import-key-pair \
+                --key /signing/key.pem \
+                --output-key-prefix /cosign-home/imported 2>/dev/null
+
+              cosign sign \
+                --key /cosign-home/imported.key \
+                --certificate /signing/cert.pem \
+                --certificate-chain /signing/chain.pem \
+                {{ include "devsecops-demo.registryInsecureFlag" . }} \
+                --use-signing-config=false \
+                --rekor-url=http://rekor-server.rekor-system.svc:80 \
+                --yes \
+                "$IMAGE"
+
+              echo ""
+              echo "=== Signature stored ==="
+              cosign tree \
+                {{ include "devsecops-demo.registryInsecureFlag" . }} \
+                "$IMAGE" || true
+
+              echo ""
+              echo "=== Signing certificate details ==="
+              echo "Fingerprint:"
+              openssl x509 -in /signing/cert.pem -noout -fingerprint -sha256
+              echo "Expiry:"
+              openssl x509 -in /signing/cert.pem -noout -enddate
+
+              echo ""
+              echo "Smallstep signing complete."
+          volumeMounts:
+            - name: signing-certs
+              mountPath: /signing
+              readOnly: true
+            - name: step-ca-root
+              mountPath: /var/run/step-ca-root
+              readOnly: true
+            - name: cosign-home
+              mountPath: /cosign-home
+{{- end }}

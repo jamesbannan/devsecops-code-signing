@@ -1,0 +1,29 @@
+# Patterns to ignore when building packages.
+# This supports shell glob matching, relative path matching, and
+# negation (prefixed with !). Only one pattern per line.
+
+# Common files
+.DS_Store
+*.swp
+*.bak
+*.tmp
+
+# CI/CD and editor configs
+.github/
+.gitlab-ci.yml
+.circleci/
+.travis.yml
+*.code-workspace
+.vscode/
+.idea/
+
+# Test directories (not packaged)
+tests/
+ci/
+
+# NOTE: chart/charts/ IS intentionally tracked in git.
+# Rationale: this is a conference demo that must be reproducible offline
+# without network access to helm repos. Vendoring the sub-charts ensures
+# 'helm install' works on any network (including a conference venue WiFi
+# that blocks sigstore.github.io or kyverno.github.io).
+# Run 'helm dependency update chart/' to refresh the vendored charts.

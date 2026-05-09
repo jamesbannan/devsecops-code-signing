@@ -1,0 +1,28 @@
+{{- if .Values.registry.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: registry
+  namespace: {{ include "devsecops-demo.registryNamespace" . }}
+  labels:
+    {{- include "devsecops-demo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: registry
+spec:
+  # NodePort in local/minikube mode — allows host-side cosign/podman to reach
+  # the registry at localhost:30500 without a port-forward.
+  # ClusterIP in cloud environments (AKS/EKS/GKE) — access via ingress or
+  # internal tooling. Override via values-aks/eks/gke.yaml.
+  type: {{ if eq .Values.global.environment "local" }}NodePort{{ else }}ClusterIP{{ end }}
+  selector:
+    app.kubernetes.io/name: registry
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: http
+      protocol: TCP
+      port: {{ .Values.registry.service.port | default 5000 }}
+      targetPort: http
+      {{- if eq .Values.global.environment "local" }}
+      nodePort: {{ .Values.registry.service.nodePort | default 30500 }}
+      {{- end }}
+{{- end }}

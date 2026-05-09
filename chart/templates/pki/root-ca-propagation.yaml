@@ -1,0 +1,193 @@
+{{/*
+pki/root-ca-propagation.yaml
+
+Post-install Job that reads the Smallstep CA root certificate from the
+step-certificates Secret in the 'pki' namespace and creates a ConfigMap
+named 'step-ca-root' in the 'workload' namespace so signing jobs can trust it.
+
+The step-certificates chart creates a Secret whose name is derived from the
+release. We discover it via label selector (app.kubernetes.io/name=step-certificates)
+to avoid hardcoding the release-prefixed name.
+
+Hook weights:
+  - weight 1: this job (runs after Kyverno at weight 5 is NOT needed here;
+    weight 1 < weight 5 so this runs before the ClusterPolicy — that's correct
+    because the policy doesn't need the root cert, but the signing jobs do)
+*/}}
+
+{{- if .Values.stepca.enabled }}
+---
+# ServiceAccount used by the propagation Job
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ca-propagator
+  namespace: {{ include "devsecops-demo.pkiNamespace" . }}
+  labels:
+    {{- include "devsecops-demo.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "1"
+    helm.sh/hook-delete-policy: before-hook-creation
+
+---
+# Role in 'pki' namespace: read configmaps to extract root CA cert
+# (step-certificates bootstrap creates a -certs ConfigMap, not a Secret)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ca-propagator-pki
+  namespace: {{ include "devsecops-demo.pkiNamespace" . }}
+  labels:
+    {{- include "devsecops-demo.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "1"
+    helm.sh/hook-delete-policy: before-hook-creation
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ca-propagator-pki
+  namespace: {{ include "devsecops-demo.pkiNamespace" . }}
+  labels:
+    {{- include "devsecops-demo.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "1"
+    helm.sh/hook-delete-policy: before-hook-creation
+subjects:
+  - kind: ServiceAccount
+    name: ca-propagator
+    namespace: {{ include "devsecops-demo.pkiNamespace" . }}
+roleRef:
+  kind: Role
+  name: ca-propagator-pki
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Role in 'workload' namespace: create/update ConfigMap with root cert
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ca-propagator-workload
+  namespace: {{ include "devsecops-demo.workloadNamespace" . }}
+  labels:
+    {{- include "devsecops-demo.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "1"
+    helm.sh/hook-delete-policy: before-hook-creation
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "create", "update", "patch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ca-propagator-workload
+  namespace: {{ include "devsecops-demo.workloadNamespace" . }}
+  labels:
+    {{- include "devsecops-demo.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "1"
+    helm.sh/hook-delete-policy: before-hook-creation
+subjects:
+  - kind: ServiceAccount
+    name: ca-propagator
+    namespace: {{ include "devsecops-demo.pkiNamespace" . }}
+roleRef:
+  kind: Role
+  name: ca-propagator-workload
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Post-install Job: extract root CA cert from step-ca Secret and publish as ConfigMap
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ca-root-propagator
+  namespace: {{ include "devsecops-demo.pkiNamespace" . }}
+  labels:
+    {{- include "devsecops-demo.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "1"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 5
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ca-root-propagator
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      serviceAccountName: ca-propagator
+      restartPolicy: OnFailure
+      containers:
+        - name: propagator
+          image: {{ include "devsecops-demo.kubectlImage" . }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -euo pipefail
+
+              PKI_NS="{{ include "devsecops-demo.pkiNamespace" . }}"
+              WORKLOAD_NS="{{ include "devsecops-demo.workloadNamespace" . }}"
+
+              # step-certificates bootstrap creates a ConfigMap named {fullname}-certs
+              # containing root_ca.crt as plaintext (not base64). Wait for it to appear.
+              echo "Waiting for step-certificates certs ConfigMap in namespace: $PKI_NS ..."
+              MAX_WAIT=120
+              WAITED=0
+              CM_NAME=""
+              while true; do
+                for cm in $(kubectl get configmap -n "$PKI_NS" \
+                  -l app.kubernetes.io/name=stepca \
+                  -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+                  if kubectl get configmap "$cm" -n "$PKI_NS" \
+                    -o jsonpath='{.data.root_ca\.crt}' 2>/dev/null | grep -q "BEGIN CERTIFICATE"; then
+                    CM_NAME="$cm"
+                    break 2
+                  fi
+                done
+                if [ "$WAITED" -ge "$MAX_WAIT" ]; then
+                  echo "ERROR: step-certificates certs ConfigMap not found after ${MAX_WAIT}s"
+                  exit 1
+                fi
+                sleep 5
+                WAITED=$((WAITED + 5))
+              done
+              echo "Found ConfigMap: $CM_NAME"
+
+              # ConfigMap data is plaintext — no base64 decode needed
+              ROOT_CERT=$(kubectl get configmap "$CM_NAME" -n "$PKI_NS" \
+                -o jsonpath='{.data.root_ca\.crt}')
+
+              if [ -z "$ROOT_CERT" ]; then
+                echo "ERROR: Could not extract root_ca.crt from ConfigMap $CM_NAME"
+                kubectl get configmap "$CM_NAME" -n "$PKI_NS" -o yaml | grep -E "^\s+root" || true
+                exit 1
+              fi
+
+              echo "Root CA cert extracted ($(echo "$ROOT_CERT" | wc -l) lines)"
+
+              # Create/update step-ca-root ConfigMap in workload namespace
+              kubectl create configmap step-ca-root \
+                --from-literal=root_ca.crt="$ROOT_CERT" \
+                -n "$WORKLOAD_NS" \
+                --dry-run=client -o yaml | kubectl apply -f -
+
+              echo "step-ca-root ConfigMap created/updated in namespace: $WORKLOAD_NS"
+              echo "Root CA propagation complete."
+{{- end }}

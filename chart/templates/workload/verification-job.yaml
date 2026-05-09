@@ -1,0 +1,134 @@
+{{- if .Values.workload.enabled }}
+---
+# verification-job — verifies signatures on the demo image via both signing paths.
+#
+# Outputs a JSON summary:
+#   {"image":"...","signed":true/false,"method":"smallstep|sigstore|none","rekor_entry":"..."}
+#
+# Exit codes:
+#   0 — at least one valid signature found (either Smallstep or Sigstore path)
+#   1 — no valid signature found
+#
+# This Job is used as the policy gate check in Demo 5 (verify.sh check 17).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: verification-job
+  namespace: {{ include "devsecops-demo.workloadNamespace" . }}
+  labels:
+    {{- include "devsecops-demo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: verification
+spec:
+  backoffLimit: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: verification-job
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      serviceAccountName: verification-sa
+      restartPolicy: Never
+
+      volumes:
+        - name: step-ca-root
+          configMap:
+            name: step-ca-root
+            optional: true  # may not exist if smallstep is disabled
+        - name: cosign-home
+          emptyDir: {}
+
+      containers:
+        - name: cosign-verify
+          image: {{ include "devsecops-demo.cosignImage" . }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          envFrom:
+            - configMapRef:
+                name: sigstore-env
+                optional: true  # may not exist if sigstore is disabled
+          env:
+            - name: HOME
+              value: /cosign-home
+            - name: IMAGE
+              value: "{{ include "devsecops-demo.demoImage" . }}"
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -uo pipefail
+
+              SIGNED=false
+              METHOD="none"
+              REKOR_ENTRY=""
+
+              echo "Verifying image: $IMAGE"
+
+              # --- Attempt 1: Sigstore keyless verification ---
+              if [ -n "${FULCIO_URL:-}" ] && [ -n "${REKOR_URL:-}" ]; then
+                echo "Attempting Sigstore keyless verification ..."
+
+                # Initialize TUF if mirror is available
+                if [ -n "${TUF_MIRROR:-}" ]; then
+                  cosign initialize \
+                    --mirror "$TUF_MIRROR" \
+                    --root "$TUF_MIRROR/root.json" 2>/dev/null || true
+                fi
+
+                VERIFY_OUT=$(cosign verify \
+                  --rekor-url "$REKOR_URL" \
+                  --certificate-identity-regexp ".*" \
+                  --certificate-oidc-issuer "https://kubernetes.default.svc" \
+                  {{ include "devsecops-demo.registryInsecureFlag" . }} \
+                  "$IMAGE" 2>&1) && SIGSTORE_OK=0 || SIGSTORE_OK=1
+
+                if [ "$SIGSTORE_OK" -eq 0 ]; then
+                  SIGNED=true
+                  METHOD="sigstore"
+                  REKOR_ENTRY=$(echo "$VERIFY_OUT" | grep -o '"logIndex":[0-9]*' | head -1 || echo "")
+                  echo "[OK] Sigstore keyless signature verified"
+                else
+                  echo "[MISS] Sigstore keyless verification: no valid signature"
+                fi
+              fi
+
+              # --- Attempt 2: Smallstep CA certificate verification ---
+              if [ "$SIGNED" = "false" ] && [ -f /var/run/step-ca-root/root_ca.crt ]; then
+                echo "Attempting Smallstep CA verification ..."
+
+                cosign verify \
+                  --certificate-chain /var/run/step-ca-root/root_ca.crt \
+                  {{ include "devsecops-demo.registryInsecureFlag" . }} \
+                  "$IMAGE" 2>&1 && SMALLSTEP_OK=0 || SMALLSTEP_OK=1
+
+                if [ "$SMALLSTEP_OK" -eq 0 ]; then
+                  SIGNED=true
+                  METHOD="smallstep"
+                  echo "[OK] Smallstep CA signature verified"
+                else
+                  echo "[MISS] Smallstep CA verification: no valid signature"
+                fi
+              fi
+
+              # --- Output JSON summary ---
+              cat <<EOF
+              {
+                "image": "$IMAGE",
+                "signed": $SIGNED,
+                "method": "$METHOD",
+                "rekor_entry": "$REKOR_ENTRY"
+              }
+              EOF
+
+              if [ "$SIGNED" = "true" ]; then
+                echo "VERIFICATION PASSED: Image has a valid signature ($METHOD)"
+                exit 0
+              else
+                echo "VERIFICATION FAILED: No valid signature found on $IMAGE"
+                exit 1
+              fi
+          volumeMounts:
+            - name: step-ca-root
+              mountPath: /var/run/step-ca-root
+              readOnly: true
+            - name: cosign-home
+              mountPath: /cosign-home
+{{- end }}

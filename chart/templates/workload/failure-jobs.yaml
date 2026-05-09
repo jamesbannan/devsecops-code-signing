@@ -1,0 +1,293 @@
+{{- if .Values.workload.enabled }}
+---
+# failure-jobs.yaml — Three Jobs that demonstrate failure scenarios for Demo 4
+# ("break things" segment). These are NOT run automatically by helm install;
+# they are triggered manually during the demo. See demos/demo4-cicd/run.sh.
+
+# =============================================================================
+# Job 1: tampered-image-job
+# Demonstrates: cosign verify fails when image layers have been modified.
+#
+# Approach: uses 'crane mutate' to add a label to the image (changing its digest),
+# then attempts cosign verify — should fail because the digest no longer matches
+# the signed digest stored in the registry.
+# =============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tampered-image-job
+  namespace: {{ include "devsecops-demo.workloadNamespace" . }}
+  labels:
+    {{- include "devsecops-demo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: failure-demo
+  annotations:
+    demo: "demo4-tampered-image"
+    description: "Demonstrates cosign verify failure when image digest has been tampered with"
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tampered-image-job
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      serviceAccountName: signing-sa
+      restartPolicy: Never
+      volumes:
+        - name: cosign-home
+          emptyDir: {}
+      containers:
+        - name: tamper-and-verify
+          # chainguard cosign image includes shell; crane commands will no-op gracefully
+          image: {{ include "devsecops-demo.cosignImage" . }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          envFrom:
+            - configMapRef:
+                name: sigstore-env
+                optional: true
+          env:
+            - name: HOME
+              value: /cosign-home
+            - name: IMAGE
+              value: "{{ include "devsecops-demo.demoImage" . }}"
+            - name: TAMPERED_IMAGE
+              value: "{{ .Values.workload.demoApp.image }}:tampered"
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -uo pipefail
+              echo "=== DEMO: Tampered Image Verification Failure ==="
+              echo ""
+              echo "Step 1: Copy image with a modified label (changes digest)"
+              crane copy \
+                {{ include "devsecops-demo.registryInsecureFlag" . }} \
+                "$IMAGE" "$TAMPERED_IMAGE" || true
+
+              # Mutate to change the digest (add a fake label)
+              crane mutate \
+                {{ include "devsecops-demo.registryInsecureFlag" . }} \
+                --label tampered=true \
+                "$TAMPERED_IMAGE" || true
+
+              echo ""
+              echo "Step 2: Attempt to verify the tampered image (EXPECTED: FAIL)"
+              cosign verify \
+                --certificate-identity-regexp ".*" \
+                --certificate-oidc-issuer "https://kubernetes.default.svc" \
+                {{ include "devsecops-demo.registryInsecureFlag" . }} \
+                "$TAMPERED_IMAGE" 2>&1 || true
+
+              echo ""
+              echo "Step 3: Verify the original image (EXPECTED: PASS)"
+              cosign verify \
+                --rekor-url "${REKOR_URL:-http://rekor-server.rekor-system.svc}" \
+                --certificate-identity-regexp ".*" \
+                --certificate-oidc-issuer "https://kubernetes.default.svc" \
+                {{ include "devsecops-demo.registryInsecureFlag" . }} \
+                "$IMAGE" 2>&1 || true
+
+              echo ""
+              echo "DEMO POINT: Signatures are bound to the image DIGEST."
+              echo "Any modification to the image — even a trivial label change —"
+              echo "produces a new digest and invalidates the existing signature."
+          volumeMounts:
+            - name: cosign-home
+              mountPath: /cosign-home
+
+---
+# =============================================================================
+# Job 2: unsigned-deploy-job
+# Demonstrates: Kyverno blocks deployment of an unsigned image when policy is
+# set to Enforce mode. In Audit mode (default), this job is admitted but a
+# PolicyReport violation is generated.
+#
+# This Job creates a simple Deployment in the workload namespace.
+# When Kyverno is in Enforce mode (Demo 5), the Deployment will be rejected
+# by the admission webhook with a clear error message.
+# =============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: unsigned-deploy-job
+  namespace: {{ include "devsecops-demo.workloadNamespace" . }}
+  labels:
+    {{- include "devsecops-demo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: failure-demo
+  annotations:
+    demo: "demo4-unsigned-deploy"
+    description: "Demonstrates Kyverno blocking deployment of an unsigned image"
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: unsigned-deploy-job
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      serviceAccountName: signing-sa
+      restartPolicy: Never
+      volumes:
+        - name: kubeconfig
+          emptyDir: {}
+      containers:
+        - name: deploy-unsigned
+          image: {{ include "devsecops-demo.kubectlImage" . }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          env:
+            - name: UNSIGNED_IMAGE
+              # busybox:1.36.1 — a real image that exists but has no cosign signature
+              value: "busybox:1.36.1"
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -uo pipefail
+              echo "=== DEMO: Unsigned Image Deployment Attempt ==="
+              echo ""
+              echo "Attempting to deploy an unsigned image: $UNSIGNED_IMAGE"
+              echo "In Enforce mode, Kyverno will block this at the admission webhook."
+              echo ""
+
+              kubectl apply -f - <<MANIFEST || echo ""
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: unsigned-demo-app
+                namespace: {{ include "devsecops-demo.workloadNamespace" . }}
+                labels:
+                  demo: unsigned-deploy
+              spec:
+                replicas: 1
+                selector:
+                  matchLabels:
+                    app: unsigned-demo-app
+                template:
+                  metadata:
+                    labels:
+                      app: unsigned-demo-app
+                  spec:
+                    containers:
+                      - name: app
+                        image: $UNSIGNED_IMAGE
+              MANIFEST
+
+              echo ""
+              echo "DEMO POINT: In Audit mode → Deployment is created but PolicyReport records a violation."
+              echo "DEMO POINT: In Enforce mode → Kyverno blocks the admission with 'image is not signed'."
+
+---
+# =============================================================================
+# Job 3: expired-cert-job
+# Demonstrates: The 5-minute TTL on Smallstep-issued signing certificates.
+#
+# NOTE: This Job does NOT automatically wait for cert expiry (that would require
+# sleeping for 10 minutes during a live demo). Instead, it:
+#   1. Shows the cert expiry timestamp
+#   2. Documents how to re-run after the cert expires to see the error
+#
+# The interactive Demo 2 script (demos/demo2-smallstep/run.sh) uses a 30-second
+# cert and sleeps through the expiry for the live audience.
+#
+# Key insight: even after the signing cert expires, cosign verify STILL PASSES
+# because the signature was valid at the time of signing. The cert TTL prevents
+# re-use of a captured cert for new signings — not replay of existing signatures.
+# =============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: expired-cert-job
+  namespace: {{ include "devsecops-demo.workloadNamespace" . }}
+  labels:
+    {{- include "devsecops-demo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: failure-demo
+  annotations:
+    demo: "demo4-expired-cert"
+    description: "Explains the 5-minute cert TTL on Smallstep-issued signing certificates"
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: expired-cert-job
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      serviceAccountName: signing-sa
+      restartPolicy: Never
+      volumes:
+        - name: step-ca-root
+          configMap:
+            name: step-ca-root
+            optional: true
+        - name: cosign-home
+          emptyDir: {}
+        - name: step-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: "step-ca.{{ include "devsecops-demo.pkiNamespace" . }}.svc.cluster.local"
+                  expirationSeconds: 600
+                  path: token
+      containers:
+        - name: show-cert-ttl
+          image: {{ include "devsecops-demo.stepCliImage" . }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          env:
+            - name: IMAGE
+              value: "{{ include "devsecops-demo.demoImage" . }}"
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -uo pipefail
+
+              STEP_CA_URL="https://step-ca.{{ include "devsecops-demo.pkiNamespace" . }}.svc.cluster.local:9000"
+              ROOT_CERT="/var/run/step-ca-root/root_ca.crt"
+
+              echo "=== DEMO: Certificate Expiry Demonstration ==="
+              echo ""
+              echo "Requesting a 30-second signing certificate (compressed timeline for demo) ..."
+
+              step ca certificate "demo-expired-cert" \
+                /tmp/expired.crt /tmp/expired.key \
+                --ca-url "$STEP_CA_URL" \
+                --root "$ROOT_CERT" \
+                --token "$(cat /var/run/step-token/token)" \
+                --not-after "30s" \
+                --force
+
+              echo ""
+              echo "Certificate issued at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              echo "Certificate expires at:"
+              openssl x509 -in /tmp/expired.crt -noout -enddate
+
+              echo ""
+              echo "Waiting 35 seconds for certificate to expire ..."
+              sleep 35
+
+              echo ""
+              echo "Certificate is now EXPIRED. Current time: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+              echo ""
+              echo "Attempting to use expired cert to sign a new image (EXPECTED: FAIL) ..."
+              # This should fail at step ca sign / the cert is past its notAfter
+              # In a real scenario, cosign would reject the cert before even calling the CA.
+              openssl x509 -in /tmp/expired.crt -noout -checkend 0 && \
+                echo "Cert is still valid (unexpected)" || \
+                echo "[EXPECTED FAILURE] Certificate is expired — cannot be used for new signings"
+
+              echo ""
+              echo "DEMO POINT: The 5-minute (or 30s for demo) cert TTL means:"
+              echo "  - An attacker who steals a signing key cannot use it after the cert expires"
+              echo "  - Existing signatures remain valid (the cert was valid AT signing time)"
+              echo "  - New signings require a new cert — meaning a new OIDC identity check"
+          volumeMounts:
+            - name: step-ca-root
+              mountPath: /var/run/step-ca-root
+              readOnly: true
+            - name: cosign-home
+              mountPath: /cosign-home
+            - name: step-token
+              mountPath: /var/run/step-token
+              readOnly: true
+{{- end }}

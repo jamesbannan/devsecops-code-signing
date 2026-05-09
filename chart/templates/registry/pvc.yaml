@@ -1,0 +1,22 @@
+{{- if .Values.registry.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: registry-storage
+  namespace: {{ include "devsecops-demo.registryNamespace" . }}
+  labels:
+    {{- include "devsecops-demo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: registry
+spec:
+  accessModes:
+    - {{ .Values.registry.storage.accessMode | default "ReadWriteOnce" }}
+  resources:
+    requests:
+      storage: {{ .Values.registry.storage.size | default "5Gi" }}
+  {{- if .Values.registry.storage.storageClassName }}
+  storageClassName: {{ .Values.registry.storage.storageClassName }}
+  {{- end }}
+  # storageClassName is omitted when empty, causing Kubernetes to use
+  # the cluster default (standard on minikube, managed-premium on AKS, etc.)
+{{- end }}

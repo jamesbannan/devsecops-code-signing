@@ -1,0 +1,65 @@
+# =============================================================================
+# values-aks.yaml — Azure Kubernetes Service overrides
+# =============================================================================
+# Usage:
+#   helm upgrade --install devsecops-demo chart/ \
+#     -f chart/values-aks.yaml \
+#     --set global.registry=<YOUR_ACR>.azurecr.io \
+#     --wait --timeout 15m
+#
+# Prerequisites:
+#   - AKS cluster with OIDC issuer enabled:
+#       az aks update --enable-oidc-issuer -n <cluster> -g <rg>
+#   - Azure Container Registry (ACR) attached to the cluster:
+#       az aks update --attach-acr <acr-name> -n <cluster> -g <rg>
+#   - The OIDC issuer URL must be configured in scaffold.fulcio values below.
+#     Find it with: az aks show -n <cluster> -g <rg> --query "oidcIssuerProfile.issuerUrl"
+# =============================================================================
+
+global:
+  environment: aks
+  # Replace with your ACR login server, e.g. myacr.azurecr.io
+  registry: "<YOUR_ACR_NAME>.azurecr.io"
+  imagePullPolicy: Always
+
+# Registry: use ClusterIP + Azure-managed ingress instead of NodePort
+registry:
+  service:
+    type: ClusterIP
+    # nodePort is ignored when type is ClusterIP
+  storage:
+    # Azure managed disks (default storage class on AKS)
+    storageClassName: "managed-csi"
+    size: 5Gi
+
+# Sigstore OIDC issuer for AKS — update to your cluster's OIDC issuer URL
+scaffold:
+  fulcio:
+    server:
+      config:
+        oidcIssuers:
+          # Replace <OIDC_ISSUER_URL> with the output of:
+          #   az aks show -n <cluster> -g <rg> --query "oidcIssuerProfile.issuerUrl"
+          "<OIDC_ISSUER_URL>":
+            issuerURL: "<OIDC_ISSUER_URL>"
+            clientID: "sigstore"
+            type: "kubernetes"
+
+# Demo app image reference — use ACR path
+workload:
+  demoApp:
+    # Replace with your ACR login server
+    image: "<YOUR_ACR_NAME>.azurecr.io/demo/app"
+    tag: latest
+
+# Disable NodePort-based host access — use kubectl port-forward or ingress instead
+hostAccess:
+  enabled: false
+
+# Optional: add ingress annotations for AKS Application Gateway or nginx ingress
+# Uncomment and configure as needed:
+# ingress:
+#   enabled: true
+#   className: azure-application-gateway  # or nginx
+#   annotations:
+#     kubernetes.io/ingress.class: azure/application-gateway

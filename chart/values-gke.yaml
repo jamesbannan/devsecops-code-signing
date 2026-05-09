@@ -1,0 +1,66 @@
+# =============================================================================
+# values-gke.yaml — Google Kubernetes Engine overrides
+# =============================================================================
+# Usage:
+#   helm upgrade --install devsecops-demo chart/ \
+#     -f chart/values-gke.yaml \
+#     --set global.registry=<REGION>-docker.pkg.dev/<PROJECT_ID>/demo \
+#     --wait --timeout 15m
+#
+# Prerequisites:
+#   - GKE cluster with Workload Identity enabled:
+#       gcloud container clusters update <name> --workload-pool=<project>.svc.id.goog
+#   - Artifact Registry repository:
+#       gcloud artifacts repositories create demo --repository-format=docker --location=<region>
+#   - Find your cluster OIDC issuer:
+#       gcloud container clusters describe <name> --format='value(identityServiceConfig.enabled)'
+#     GKE Workload Identity issuer: https://container.googleapis.com/v1/projects/<project>/locations/<region>/clusters/<cluster>
+# =============================================================================
+
+global:
+  environment: gke
+  # Replace with your GAR registry path, e.g. australia-southeast1-docker.pkg.dev/my-project/demo
+  registry: "<REGION>-docker.pkg.dev/<PROJECT_ID>/demo"
+  imagePullPolicy: Always
+
+# Registry: use ClusterIP on GKE (access via GCP load balancer or port-forward)
+registry:
+  service:
+    type: ClusterIP
+  storage:
+    # GCP Persistent Disk CSI driver (standard on GKE 1.18+)
+    storageClassName: "standard-rwo"
+    size: 5Gi
+
+# Sigstore OIDC issuer for GKE — update to your cluster's Workload Identity issuer
+scaffold:
+  fulcio:
+    server:
+      config:
+        oidcIssuers:
+          # GKE Workload Identity issuer format:
+          # https://container.googleapis.com/v1/projects/<project>/locations/<region>/clusters/<cluster>
+          "<GKE_WORKLOAD_IDENTITY_ISSUER>":
+            issuerURL: "<GKE_WORKLOAD_IDENTITY_ISSUER>"
+            clientID: "sigstore"
+            type: "kubernetes"
+
+# Demo app image reference — use GAR path
+workload:
+  demoApp:
+    # Replace with your GAR registry path
+    image: "<REGION>-docker.pkg.dev/<PROJECT_ID>/demo/app"
+    tag: latest
+
+# Disable NodePort-based host access
+hostAccess:
+  enabled: false
+
+# Optional: configure GKE Ingress annotations
+# Uncomment and configure as needed:
+# ingress:
+#   enabled: true
+#   className: gce
+#   annotations:
+#     kubernetes.io/ingress.class: gce
+#     kubernetes.io/ingress.global-static-ip-name: <static-ip-name>

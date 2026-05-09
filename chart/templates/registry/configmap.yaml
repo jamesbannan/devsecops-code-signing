@@ -1,0 +1,38 @@
+{{- if .Values.registry.enabled }}
+---
+# Registry configuration file mounted into the registry container.
+# Authentication is intentionally disabled — this is a local demo only.
+# Do not expose the registry NodePort externally.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: registry-config
+  namespace: {{ include "devsecops-demo.registryNamespace" . }}
+  labels:
+    {{- include "devsecops-demo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: registry
+data:
+  config.yml: |
+    version: 0.1
+    log:
+      fields:
+        service: registry
+    storage:
+      delete:
+        # delete: enabled is required for demo cleanup between runs (push new
+        # unsigned, delete, push signed, etc.) and for the tampered-image demo.
+        enabled: true
+      cache:
+        blobdescriptor: inmemory
+      filesystem:
+        rootdirectory: /var/lib/registry
+    http:
+      addr: :5000
+      headers:
+        X-Content-Type-Options: [nosniff]
+    health:
+      storagedriver:
+        enabled: true
+        interval: 10s
+        threshold: 3
+{{- end }}

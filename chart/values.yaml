@@ -1,0 +1,353 @@
+# =============================================================================
+# DevSecOps Demo — Default Values (local / minikube)
+# =============================================================================
+# These values target a local minikube cluster started with scripts/start-minikube.sh.
+# For cloud deployments, overlay with values-aks.yaml / values-eks.yaml / values-gke.yaml.
+# =============================================================================
+
+global:
+  environment: local        # local | aks | eks | gke
+  registry: localhost:30500 # image registry used in pod specs (NodePort for local)
+  imagePullPolicy: IfNotPresent
+
+# =============================================================================
+# Smallstep CA — step-certificates sub-chart (alias: stepca)
+# =============================================================================
+# IMPORTANT: certmanagerEnabled: false — standalone mode only, no cert-manager
+# The step-certificates chart creates its own resources; we configure it here.
+# =============================================================================
+stepca:
+  enabled: true
+
+  # DEVIATION: step-certificates 1.30.1 has a different values API than what
+  # INSTRUCTIONS.md specified (which referenced an older version). certmanagerEnabled,
+  # namespaceOverride, authority.provisioners, and persistence.enabled are not valid
+  # keys in this chart version. The chart deploys to {{ .Release.Namespace }} (pki),
+  # set via --namespace in install.sh. Provisioners are added via postInitHook if needed.
+
+  ca:
+    name: "DevSecOps Demo CA"
+    address: ":9000"
+    # comma-separated DNS SANs for the CA's TLS cert
+    dns: "step-ca.pki.svc.cluster.local,step-ca.pki.svc,localhost"
+    db:
+      enabled: true
+      persistent: false   # emptyDir — ephemeral demo CA; data lost on pod restart
+    provisioner:
+      name: workload-signer   # JWK provisioner created by the bootstrap job
+
+  service:
+    type: ClusterIP
+    port: 9000
+    targetPort: 9000
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 300m
+      memory: 256Mi
+
+# =============================================================================
+# Docker Registry v2
+# =============================================================================
+# Native template (no upstream chart dependency). registry:2.8.3 only.
+# No authentication — intentional for local demo. Do not expose publicly.
+# =============================================================================
+registry:
+  enabled: true
+  namespace: registry
+
+  image:
+    repository: registry
+    tag: "2.8.3"
+    pullPolicy: IfNotPresent
+
+  storage:
+    size: 5Gi
+    accessMode: ReadWriteOnce
+    # storageClassName: "" uses cluster default; override per cloud environment
+    storageClassName: ""
+
+  service:
+    # NodePort for local minikube access from host.
+    # Overridden to ClusterIP in values-aks/eks/gke.yaml.
+    type: NodePort
+    port: 5000
+    nodePort: 30500
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+# =============================================================================
+# Sigstore — condition flag for scaffold sub-chart dependency
+# =============================================================================
+sigstore:
+  enabled: true
+
+# =============================================================================
+# Sigstore scaffold sub-chart values
+# =============================================================================
+# These values are passed DIRECTLY to the 'scaffold' sub-chart dependency.
+# The key must be 'scaffold' to match the dependency name in Chart.yaml.
+# Do NOT nest under 'sigstore:' — that key is only the condition flag above.
+#
+# The scaffold chart creates and manages these namespaces itself:
+#   ctlog-system, fulcio-system, rekor-system, tuf-system, trillian-system
+# Do NOT pre-create them in chart/templates/namespaces.yaml.
+# =============================================================================
+scaffold:
+  fulcio:
+    enabled: true
+    namespace:
+      name: fulcio-system
+      create: true
+    server:
+      replicaCount: 1
+      args:
+        # DEVIATION: 'ephemeralca' is not a valid CA type in Fulcio v1.8.5.
+        # Valid types: googleca, pkcs11ca, aws-hsm-root-ca-path, fileca, kmsca.
+        # 'fileca' is used here; the createcerts job creates the required
+        # fulcio-server-secret (key.pem + cert.pem) before Fulcio is ready.
+        certificateAuthority: fileca
+        port: 5555
+        grpcPort: 5554
+      ingress:
+        http:
+          enabled: false
+        grpc:
+          enabled: false
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          cpu: 300m
+          memory: 256Mi
+    # config.contents intentionally omitted: the fulcio chart default already
+    # includes the correct Kubernetes OIDC issuer (https://kubernetes.default.svc).
+    createcerts:
+      enabled: true
+      replicaCount: 1
+
+  rekor:
+    enabled: true
+    namespace:
+      name: rekor-system
+      create: true
+    server:
+      replicaCount: 1
+      ingress:
+        enabled: false
+      service:
+        port: 3000
+        type: ClusterIP
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          cpu: 300m
+          memory: 256Mi
+    redis:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 100m
+          memory: 128Mi
+    mysql:
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          cpu: 300m
+          memory: 512Mi
+
+  ctlog:
+    enabled: true
+    namespace:
+      name: ctlog-system
+      create: true
+    server:
+      replicaCount: 1
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          cpu: 200m
+          memory: 256Mi
+
+  trillian:
+    enabled: true
+    namespace:
+      name: trillian-system
+      create: true
+    logServer:
+      replicaCount: 1
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          cpu: 300m
+          memory: 256Mi
+    logSigner:
+      replicaCount: 1
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          cpu: 300m
+          memory: 256Mi
+    mysql:
+      livenessProbe:
+        initialDelaySeconds: 30
+        periodSeconds: 10
+        timeoutSeconds: 10
+        failureThreshold: 5
+        successThreshold: 1
+        exec:
+          command:
+            - /etc/init.d/mysql
+            - status
+      readinessProbe:
+        initialDelaySeconds: 10
+        periodSeconds: 10
+        timeoutSeconds: 10
+        failureThreshold: 5
+        successThreshold: 1
+        exec:
+          command:
+            - /etc/init.d/mysql
+            - status
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          cpu: 300m
+          memory: 512Mi
+
+  tuf:
+    enabled: true
+    namespace:
+      name: tuf-system
+      create: true
+    secrets:
+      tsa:
+        enabled: false
+    service:
+      port: 80
+      type: ClusterIP
+    ingress:
+      enabled: false
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+
+  copySecretJob:
+    enabled: false
+
+# =============================================================================
+# Kyverno — upstream chart (condition: kyverno.enabled)
+# =============================================================================
+kyverno:
+  enabled: true
+
+  # Override Kyverno's release namespace to 'policy'
+  namespaceOverride: policy
+
+  admissionController:
+    replicas: 1
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        memory: 384Mi
+
+  backgroundController:
+    resources:
+      requests:
+        cpu: 100m
+        memory: 64Mi
+      limits:
+        memory: 128Mi
+
+  cleanupController:
+    resources:
+      requests:
+        cpu: 100m
+        memory: 64Mi
+      limits:
+        memory: 128Mi
+
+  reportsController:
+    resources:
+      requests:
+        cpu: 100m
+        memory: 64Mi
+      limits:
+        memory: 128Mi
+
+# =============================================================================
+# Workload — demo app + signing jobs + verification job
+# =============================================================================
+workload:
+  enabled: true
+  namespace: workload
+
+  demoApp:
+    image: localhost:30500/demo/app
+    tag: latest
+
+  cosign:
+    image: cgr.dev/chainguard/cosign:latest
+
+  stepCli:
+    image: smallstep/step-cli:0.25.0
+
+  kubectlImage: bitnami/kubectl:latest
+
+  signing:
+    smallstep:
+      enabled: true
+    sigstore:
+      enabled: true
+
+  # Kyverno ClusterPolicy enforcement mode.
+  # Audit: log violations, do not block.
+  # Enforce: block unsigned images at admission.
+  # Switch to Enforce during Demo 5 (see demos/demo5-verification/run.sh).
+  policy:
+    validationFailureAction: Audit
+
+# =============================================================================
+# Host-side port access (NodePort / port-forward for local cosign CLI)
+# =============================================================================
+# These NodePorts are used by scripts/port-forward.sh in local mode.
+# Disabled (set enabled: false) in cloud environment overlays.
+# =============================================================================
+hostAccess:
+  enabled: true
+  rekor:
+    nodePort: 30300
+  fulcio:
+    nodePort: 30200
+  tuf:
+    nodePort: 30100

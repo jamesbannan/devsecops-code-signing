@@ -1,0 +1,56 @@
+{{/*
+namespaces.yaml — Creates component namespaces for the devsecops-demo chart.
+
+IMPORTANT: Only create namespaces owned by this chart's own templates.
+The scaffold sub-chart creates and manages its own namespaces:
+  - ctlog-system
+  - fulcio-system
+  - rekor-system
+  - tuf-system
+  - trillian-system
+Do NOT add those here — pre-creating them causes helm install to fail.
+*/}}
+
+{{- if .Values.stepca.enabled }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ include "devsecops-demo.pkiNamespace" . }}
+  labels:
+    {{- include "devsecops-demo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pki
+{{- end }}
+
+{{- if .Values.registry.enabled }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ include "devsecops-demo.registryNamespace" . }}
+  labels:
+    {{- include "devsecops-demo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: registry
+{{- end }}
+
+{{- if .Values.workload.enabled }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ include "devsecops-demo.workloadNamespace" . }}
+  labels:
+    {{- include "devsecops-demo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: workload
+{{- end }}
+
+{{- if .Values.kyverno.enabled }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ include "devsecops-demo.policyNamespace" . }}
+  labels:
+    {{- include "devsecops-demo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: policy
+{{- end }}

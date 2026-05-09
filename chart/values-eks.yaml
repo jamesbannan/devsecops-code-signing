@@ -1,0 +1,67 @@
+# =============================================================================
+# values-eks.yaml — Amazon Elastic Kubernetes Service overrides
+# =============================================================================
+# Usage:
+#   helm upgrade --install devsecops-demo chart/ \
+#     -f chart/values-eks.yaml \
+#     --set global.registry=<AWS_ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com \
+#     --wait --timeout 15m
+#
+# Prerequisites:
+#   - EKS cluster with IRSA (IAM Roles for Service Accounts) configured
+#   - Amazon ECR repository created:
+#       aws ecr create-repository --repository-name demo/app
+#   - OIDC provider for your EKS cluster enabled:
+#       eksctl utils associate-iam-oidc-provider --cluster <name> --approve
+#   - Find your cluster OIDC issuer:
+#       aws eks describe-cluster --name <name> --query "cluster.identity.oidc.issuer"
+# =============================================================================
+
+global:
+  environment: eks
+  # Replace with your ECR registry, e.g. 123456789012.dkr.ecr.ap-southeast-2.amazonaws.com
+  registry: "<AWS_ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com"
+  imagePullPolicy: Always
+
+# Registry: use ClusterIP on EKS (access via load balancer or port-forward)
+registry:
+  service:
+    type: ClusterIP
+  storage:
+    # AWS EBS CSI driver storage class (standard on EKS 1.23+)
+    storageClassName: "gp2"
+    size: 5Gi
+
+# Sigstore OIDC issuer for EKS — update to your cluster's OIDC issuer URL
+scaffold:
+  fulcio:
+    server:
+      config:
+        oidcIssuers:
+          # Replace <OIDC_ISSUER_URL> with the output of:
+          #   aws eks describe-cluster --name <name> --query "cluster.identity.oidc.issuer"
+          "<OIDC_ISSUER_URL>":
+            issuerURL: "<OIDC_ISSUER_URL>"
+            clientID: "sigstore"
+            type: "kubernetes"
+
+# Demo app image reference — use ECR path
+workload:
+  demoApp:
+    # Replace with your ECR registry path
+    image: "<AWS_ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/demo/app"
+    tag: latest
+
+# Disable NodePort-based host access
+hostAccess:
+  enabled: false
+
+# Optional: configure AWS Load Balancer Controller annotations
+# Uncomment and configure as needed:
+# ingress:
+#   enabled: true
+#   className: alb
+#   annotations:
+#     kubernetes.io/ingress.class: alb
+#     alb.ingress.kubernetes.io/scheme: internal
+#     alb.ingress.kubernetes.io/target-type: ip

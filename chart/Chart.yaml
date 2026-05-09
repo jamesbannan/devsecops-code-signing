@@ -1,0 +1,38 @@
+apiVersion: v2
+name: devsecops-demo
+description: >
+  Automated code signing demonstration environment for BSides Melbourne 2026.
+  Deploys Smallstep CA, Sigstore (Fulcio + Rekor + ctlog + TUF), Docker Registry v2,
+  demo workloads, and Kyverno policy enforcement in a single helm install.
+version: 0.1.0
+type: application
+keywords:
+  - devsecops
+  - code-signing
+  - sigstore
+  - smallstep
+  - cosign
+  - supply-chain
+
+dependencies:
+  # INSTRUCTIONS.md specifies 0.6.103 — confirmed available in the repo
+  - name: scaffold
+    version: "0.6.103"
+    repository: https://sigstore.github.io/helm-charts
+    condition: sigstore.enabled
+
+  # INSTRUCTIONS.md specifies 3.2.6 — not available in the repo (oldest is 3.5.0).
+  # DEVIATION: using 3.5.3 (nearest stable). Kyverno ClusterPolicy API is unchanged.
+  - name: kyverno
+    version: "3.5.3"
+    repository: https://kyverno.github.io/kyverno/
+    condition: kyverno.enabled
+
+  # INSTRUCTIONS.md specifies 2.1.6 — not available (Smallstep repackaged the chart;
+  # current release is 1.30.1 which maps to step-ca v0.30.x).
+  # DEVIATION: using 1.30.1. Values structure is compatible; certmanagerEnabled still works.
+  - name: step-certificates
+    alias: stepca
+    version: "1.30.1"
+    repository: https://smallstep.github.io/helm-charts
+    condition: stepca.enabled

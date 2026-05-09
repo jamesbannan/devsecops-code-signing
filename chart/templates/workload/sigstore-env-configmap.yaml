@@ -1,0 +1,29 @@
+{{- if and .Values.workload.enabled .Values.sigstore.enabled }}
+---
+# ConfigMap containing Sigstore service URLs for in-cluster use.
+# These are the in-cluster DNS names created by the scaffold sub-chart.
+# Injected as envFrom into signing and verification jobs.
+#
+# NOTE: Service names are based on the scaffold chart's default fullnameOverride
+# values. If you override fullnameOverride in scaffold sub-chart values, update
+# the URLs below accordingly.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sigstore-env
+  namespace: {{ include "devsecops-demo.workloadNamespace" . }}
+  labels:
+    {{- include "devsecops-demo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: workload-sigstore-config
+data:
+  # Fulcio certificate authority — issues ephemeral signing certs
+  FULCIO_URL: "http://fulcio-server.fulcio-system.svc"
+  # Rekor transparency log — records all signing events
+  REKOR_URL: "http://rekor-server.rekor-system.svc"
+  # TUF mirror — cosign uses this to bootstrap trust roots
+  TUF_MIRROR: "http://tuf.tuf-system.svc"
+  # cosign uses SIGSTORE_TUF_ROOT to find the TUF root.json
+  SIGSTORE_TUF_ROOT: "http://tuf.tuf-system.svc/root.json"
+  # Suppress cosign's warning about experimental features in keyless mode
+  COSIGN_EXPERIMENTAL: "1"
+{{- end }}

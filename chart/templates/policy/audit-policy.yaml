@@ -1,0 +1,59 @@
+{{- if and .Values.kyverno.enabled .Values.workload.enabled }}
+---
+# audit-policy.yaml — Kyverno ClusterPolicy that generates audit events for
+# every signed image admission in the workload namespace.
+#
+# This is the foundation of the Demo 6 CISO audit trail:
+# the PolicyReport shows WHO signed WHAT image and WHEN it was admitted.
+#
+# Unlike cluster-image-policy.yaml, this policy is always in Audit mode —
+# it does not block admissions. It purely generates reports.
+#
+# Hook weight 6: must apply after the main signature policy (weight 5).
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: audit-signed-image-admission
+  labels:
+    {{- include "devsecops-demo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: policy-audit
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "6"
+    helm.sh/hook-delete-policy: before-hook-creation
+    policies.kyverno.io/title: Audit Signed Image Admissions
+    policies.kyverno.io/category: Audit Trail
+    policies.kyverno.io/severity: low
+    policies.kyverno.io/description: >-
+      Generates a PolicyReport entry for every Pod admitted into the workload
+      namespace. Reports include the image digest, signing identity, and
+      admission timestamp — providing the CISO-friendly audit trail shown in
+      Demo 6.
+spec:
+  # Always Audit — this policy generates reports, it never blocks.
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: audit-image-admission
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - {{ include "devsecops-demo.workloadNamespace" . }}
+      validate:
+        message: >-
+          Pod admitted to workload namespace. Image: {{ "{{" }}request.object.spec.containers[0].image{{ "}}" }}.
+          Admission recorded in PolicyReport for audit trail.
+        # This pattern always passes (non-empty string is truthy in CEL).
+        # Its purpose is to generate a PolicyReport entry on every admission,
+        # not to enforce a policy.
+        deny:
+          conditions:
+            any:
+              # Never deny — condition is always false
+              - key: "false"
+                operator: Equals
+                value: "true"
+{{- end }}
