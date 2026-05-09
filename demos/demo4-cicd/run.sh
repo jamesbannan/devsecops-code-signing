@@ -5,13 +5,14 @@
 # Simulates a GitHub Actions run locally using shell steps that mirror
 # the workflow — complete with group/step output formatting for familiarity.
 #
-#   ▶ [BUILD]  podman build the demo app
-#   ▶ [PUSH]   push to local registry
-#   ▶ [SIGN]   both signing paths (Smallstep + Sigstore)
-#   ▶ [VERIFY] run the verification job
-#   ▶ [DEPLOY] apply a Deployment — Kyverno admits the signed image
+#   ▶ [BUILD]  Build the demo app container image
+#   ▶ [PUSH]   Push to the local registry
+#   ▶ [SIGN]   Both signing paths from the host (Smallstep + Sigstore keyless)
+#   ▶ [VERIFY] Verify both signatures with cosign
+#   ▶ [DEPLOY] Apply a Deployment — Kyverno admits the signed image
 #
-# Duration: ~10 minutes
+# Prerequisites: cosign, kubectl, step, python3, minikube (or podman/docker)
+# Duration: ~5 minutes
 # =============================================================================
 set -euo pipefail
 
@@ -27,24 +28,32 @@ NC='\033[0m'
 
 REGISTRY="${REGISTRY:-localhost:30500}"
 IMAGE="${IMAGE:-${REGISTRY}/demo/app:latest}"
+# In-cluster image reference for the Deployment — Kyverno runs inside the cluster
+# and cannot reach localhost:30500, so we use the in-cluster DNS name.
+CLUSTER_IMAGE="registry.registry.svc:5000/demo/app:latest"
 REKOR_URL="${REKOR_URL:-http://localhost:30300}"
 FULCIO_URL="${FULCIO_URL:-http://localhost:30200}"
-TUF_URL="${TUF_URL:-http://localhost:30100}"
+STEP_CA_URL="${STEP_CA_URL:-https://localhost:39000}"
 
 GIT_SHA=$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+TMPDIR=$(mktemp -d /tmp/demo4-cicd-XXXXXX)
+
+cleanup() {
+  rm -rf "$TMPDIR"
+  kubectl delete deployment demo-app-signed -n workload --ignore-not-found=true 2>/dev/null || true
+}
+trap cleanup EXIT
 
 # CI-style step output
 step_start() { printf "\n${BOLD}${CYAN}▶ [%s]${NC} %s\n" "$1" "$2"; }
 step_end()   { printf "  ${GREEN}✓ %s${NC}\n" "$1"; }
 cmd()        { printf "  ${YELLOW}\$ %s${NC}\n" "$*"; }
 narrate()    { printf "\n${BOLD}%s${NC}\n" "$1"; }
-
-# Cleanup: remove the demo deployment on exit
-cleanup() {
-  kubectl delete deployment demo-app-signed -n workload --ignore-not-found=true 2>/dev/null || true
-}
-trap cleanup EXIT
+ok()         { printf "  ${GREEN}[OK]${NC} %s\n" "$1"; }
+fail()       { printf "  ${RED}[FAIL]${NC} %s\n" "$1"; }
+note()       { printf "  ${CYAN}ℹ  %s${NC}\n" "$1"; }
 
 printf "\n${CYAN}${BOLD}"
 echo "╔══════════════════════════════════════════════════════════════╗"
@@ -62,20 +71,40 @@ sleep 2
 # =============================================================================
 step_start "BUILD" "Building container image"
 echo ""
-cmd "podman build --build-arg GIT_SHA=$GIT_SHA --build-arg BUILD_TIME=$BUILD_TIME -t $IMAGE ."
 
-if command -v podman &>/dev/null; then
-  podman build \
-    --build-arg "GIT_SHA=$GIT_SHA" \
-    --build-arg "BUILD_TIME=$BUILD_TIME" \
-    --tag "$IMAGE" \
-    "$REPO_ROOT/demos/demo-app" 2>&1 | tail -5
-  step_end "Image built: $IMAGE"
+# Detect build tool (same logic as build-and-push.sh)
+BUILD_TOOL=""
+if command -v minikube &>/dev/null && minikube status --format='{{.Host}}' 2>/dev/null | grep -q Running; then
+  BUILD_TOOL="minikube"
+elif command -v podman &>/dev/null; then
+  BUILD_TOOL="podman"
+elif command -v docker &>/dev/null; then
+  BUILD_TOOL="docker"
 else
-  echo "  (podman not found — skipping actual build, continuing simulation)"
-  step_end "Build step simulated"
+  fail "No container build tool found (minikube, podman, or docker)"
+  exit 1
 fi
+note "Build tool: $BUILD_TOOL"
 
+case "$BUILD_TOOL" in
+  minikube)
+    cmd "minikube image build -t $IMAGE demos/demo-app/"
+    minikube image build -t "$IMAGE" "$REPO_ROOT/demos/demo-app" 2>&1 | tail -3
+    ;;
+  podman)
+    cmd "podman build -t $IMAGE demos/demo-app/"
+    podman build --tls-verify=false \
+      --build-arg "GIT_SHA=$GIT_SHA" --build-arg "BUILD_TIME=$BUILD_TIME" \
+      --tag "$IMAGE" "$REPO_ROOT/demos/demo-app" 2>&1 | tail -3
+    ;;
+  docker)
+    cmd "docker build -t $IMAGE demos/demo-app/"
+    docker build --build-arg "GIT_SHA=$GIT_SHA" --build-arg "BUILD_TIME=$BUILD_TIME" \
+      --tag "$IMAGE" "$REPO_ROOT/demos/demo-app" 2>&1 | tail -3
+    ;;
+esac
+
+step_end "Image built: $IMAGE"
 sleep 1
 
 # =============================================================================
@@ -83,56 +112,120 @@ sleep 1
 # =============================================================================
 step_start "PUSH" "Pushing image to registry"
 echo ""
-cmd "podman push --tls-verify=false $IMAGE"
 
-if command -v podman &>/dev/null; then
-  podman push --tls-verify=false "$IMAGE" 2>&1 | tail -3
-  step_end "Image pushed to $REGISTRY"
-else
-  echo "  (simulated push)"
-  step_end "Push step simulated"
+case "$BUILD_TOOL" in
+  minikube)
+    REGISTRY_IP=$(kubectl get svc registry -n registry -o jsonpath='{.spec.clusterIP}')
+    PUSH_REF="${REGISTRY_IP}:5000/demo/app:latest"
+    cmd "minikube ssh -- sudo ctr push --plain-http $PUSH_REF"
+    minikube ssh -- "sudo ctr -n k8s.io images tag '$IMAGE' '$PUSH_REF'" 2>/dev/null || true
+    minikube ssh -- "sudo ctr -n k8s.io images push --plain-http '$PUSH_REF'" 2>&1 | tail -3
+    # Tag for in-cluster Deployment (Kyverno verifies via this name)
+    minikube ssh -- "sudo ctr -n k8s.io images tag '$IMAGE' '$CLUSTER_IMAGE'" 2>/dev/null || true
+    ;;
+  podman)
+    cmd "podman push --tls-verify=false $IMAGE"
+    podman push --tls-verify=false "$IMAGE" 2>&1 | tail -3
+    ;;
+  docker)
+    cmd "docker push $IMAGE"
+    docker push "$IMAGE" 2>&1 | tail -3
+    ;;
+esac
+
+step_end "Image pushed to $REGISTRY"
+sleep 1
+
+# =============================================================================
+# Step 3: SIGN — Smallstep path (from host)
+# =============================================================================
+step_start "SIGN" "Path A: Smallstep CA (private PKI)"
+echo ""
+narrate "  Request a short-lived code signing cert from step-ca → sign with cosign"
+
+# Fetch CA materials
+kubectl get configmap step-ca-root -n workload \
+  -o jsonpath='{.data.root_ca\.crt}' > "$TMPDIR/root_ca.crt"
+kubectl get configmap devsecops-demo-stepca-certs -n pki \
+  -o jsonpath='{.data.intermediate_ca\.crt}' > "$TMPDIR/intermediate_ca.crt"
+cat "$TMPDIR/intermediate_ca.crt" "$TMPDIR/root_ca.crt" > "$TMPDIR/chain.pem"
+
+PROV_PASSWORD=$(kubectl get secret devsecops-demo-stepca-provisioner-password -n pki \
+  -o jsonpath='{.data.password}' | base64 -d)
+
+cmd "step ca certificate demo4-pipeline cert.pem key.pem --not-after 5m"
+STEP_OUTPUT=$(step ca certificate "demo4-pipeline" "$TMPDIR/cert.pem" "$TMPDIR/key.pem" \
+  --ca-url "$STEP_CA_URL" \
+  --root "$TMPDIR/root_ca.crt" \
+  --provisioner "workload-signer" \
+  --provisioner-password-file <(echo "$PROV_PASSWORD") \
+  --san "pipeline@demo.local" \
+  --not-after "5m" \
+  --force 2>&1) && STEP_RC=0 || STEP_RC=$?
+
+if [ "$STEP_RC" -ne 0 ]; then
+  echo "$STEP_OUTPUT" | sed 's/^/  /'
+  fail "step-ca cert request failed — is the port-forward running? (bash scripts/port-forward.sh)"
+  exit 1
 fi
 
+# Convert key to cosign format
+COSIGN_PASSWORD="" cosign import-key-pair \
+  --key "$TMPDIR/key.pem" \
+  --output-key-prefix "$TMPDIR/cosign-imported" 2>/dev/null
+
+cmd "cosign sign --key cosign-imported.key --certificate cert.pem --certificate-chain chain.pem $IMAGE"
+SMALLSTEP_SIGN=$(COSIGN_PASSWORD="" cosign sign \
+  --key "$TMPDIR/cosign-imported.key" \
+  --certificate "$TMPDIR/cert.pem" \
+  --certificate-chain "$TMPDIR/chain.pem" \
+  --rekor-url "$REKOR_URL" \
+  --allow-insecure-registry \
+  --use-signing-config=false \
+  --yes \
+  "$IMAGE" 2>&1) && SS_RC=0 || SS_RC=$?
+
+if [ "$SS_RC" -eq 0 ]; then
+  echo "$SMALLSTEP_SIGN" | grep -E "tlog|entry|Pushing" | head -3 | sed 's/^/  /'
+  step_end "Smallstep signing complete (cert expires in 5 minutes)"
+else
+  echo "$SMALLSTEP_SIGN" | tail -3 | sed 's/^/  /'
+  fail "Smallstep cosign sign failed"
+  exit 1
+fi
 sleep 1
 
 # =============================================================================
-# Step 3: SIGN — Smallstep path
+# Step 4: SIGN — Sigstore keyless path (from host)
 # =============================================================================
-step_start "SIGN" "Signing with Smallstep CA (private PKI path)"
+step_start "SIGN" "Path B: Sigstore keyless (Fulcio + Rekor)"
 echo ""
-narrate "  Path A: Private CA → short-lived cert → cosign sign"
-cmd "cosign sign --key signing.key --certificate signing.crt --certificate-chain root_ca.crt $IMAGE"
+narrate "  OIDC token → Fulcio cert → cosign sign → Rekor log entry"
 
-# Trigger the Smallstep signing job in cluster
-kubectl delete job signing-job-smallstep -n workload --ignore-not-found=true 2>/dev/null || true
-kubectl apply -f "$REPO_ROOT/chart/templates/workload/signing-job-smallstep.yaml" \
-  --dry-run=server 2>/dev/null || true
+cmd "kubectl create token signing-sa -n workload --audience=sigstore"
+TOKEN=$(kubectl create token signing-sa -n workload --audience=sigstore --duration=10m)
 
-echo ""
-echo "  Waiting for Smallstep signing job ..."
-kubectl wait --for=condition=complete job/signing-job-smallstep -n workload --timeout=120s 2>/dev/null || \
-  echo "  (job may still be running — check: kubectl logs -n workload job/signing-job-smallstep)"
+cmd "cosign sign --fulcio-url $FULCIO_URL --rekor-url $REKOR_URL --identity-token <token> $IMAGE"
+SIGN_OUTPUT=$(cosign sign \
+  --fulcio-url "$FULCIO_URL" \
+  --rekor-url "$REKOR_URL" \
+  --identity-token "$TOKEN" \
+  --allow-insecure-registry \
+  --use-signing-config=false \
+  --yes \
+  "$IMAGE" 2>&1) && SIGN_RC=0 || SIGN_RC=$?
 
-step_end "Smallstep signing complete"
-sleep 1
-
-# =============================================================================
-# Step 4: SIGN — Sigstore keyless path
-# =============================================================================
-step_start "SIGN" "Signing with Sigstore keyless (transparency log path)"
-echo ""
-narrate "  Path B: OIDC token → Fulcio cert → cosign sign → Rekor log entry"
-cmd "cosign sign --fulcio-url $FULCIO_URL --rekor-url $REKOR_URL --identity-token \$TOKEN $IMAGE"
-
-kubectl delete job signing-job-sigstore -n workload --ignore-not-found=true 2>/dev/null || true
-echo "  Waiting for Sigstore signing job ..."
-kubectl wait --for=condition=complete job/signing-job-sigstore -n workload --timeout=120s 2>/dev/null || \
-  echo "  (job may still be running)"
+if [ "$SIGN_RC" -eq 0 ]; then
+  echo "$SIGN_OUTPUT" | grep -E "tlog|entry|SCT" | head -3 | sed 's/^/  /'
+  step_end "Sigstore keyless signing complete"
+else
+  echo "$SIGN_OUTPUT" | tail -3 | sed 's/^/  /'
+  fail "Keyless signing failed"
+fi
 
 REKOR_TREE=$(curl -sf "$REKOR_URL/api/v1/log" 2>/dev/null | \
   python3 -c "import sys,json; print(json.load(sys.stdin).get('treeSize','?'))" 2>/dev/null || echo "?")
-echo "  Rekor tree size: $REKOR_TREE (entry added)"
-step_end "Sigstore keyless signing complete"
+echo "  Rekor tree size: $REKOR_TREE"
 sleep 1
 
 # =============================================================================
@@ -140,16 +233,29 @@ sleep 1
 # =============================================================================
 step_start "VERIFY" "Verifying image signatures"
 echo ""
-cmd "cosign verify --rekor-url $REKOR_URL --certificate-identity-regexp '.*' $IMAGE"
 
-cosign verify \
+SA_IDENTITY="https://kubernetes.io/namespaces/workload/serviceaccounts/signing-sa"
+OIDC_ISSUER="https://kubernetes.default.svc"
+
+cmd "cosign verify --certificate-identity '$SA_IDENTITY' \\"
+cmd "  --certificate-oidc-issuer '$OIDC_ISSUER' $IMAGE"
+
+VERIFY_OUTPUT=$(cosign verify \
   --rekor-url "$REKOR_URL" \
-  --certificate-identity-regexp ".*" \
-  --certificate-oidc-issuer "https://kubernetes.default.svc" \
+  --certificate-identity "$SA_IDENTITY" \
+  --certificate-oidc-issuer "$OIDC_ISSUER" \
   --allow-insecure-registry \
-  "$IMAGE" 2>&1 | head -5 || echo "  (verification in progress)"
+  --insecure-ignore-sct=true \
+  "$IMAGE" 2>&1) && VERIFY_RC=0 || VERIFY_RC=$?
 
-step_end "Signatures verified"
+if [ "$VERIFY_RC" -eq 0 ]; then
+  echo "$VERIFY_OUTPUT" | grep -v "^$\|WARNING:" | head -5 | sed 's/^/  /'
+  step_end "Signatures verified"
+else
+  echo "$VERIFY_OUTPUT" | tail -5 | sed 's/^/  /'
+  fail "Verification failed"
+fi
+
 sleep 1
 
 # =============================================================================
@@ -158,6 +264,7 @@ sleep 1
 step_start "DEPLOY" "Deploying to workload namespace"
 echo ""
 narrate "  Kyverno's admission webhook validates the signature before the pod is created."
+note "Using in-cluster registry address: $CLUSTER_IMAGE"
 cmd "kubectl apply -f deployment.yaml"
 
 kubectl apply -f - <<EOF
@@ -181,17 +288,13 @@ spec:
     spec:
       containers:
         - name: app
-          image: $IMAGE
-          imagePullPolicy: Always
+          image: $CLUSTER_IMAGE
+          imagePullPolicy: IfNotPresent
           env:
             - name: IMAGE_SIGNED
               value: "true"
           ports:
             - containerPort: 8080
-          readinessProbe:
-            httpGet:
-              path: /healthz
-              port: 8080
 EOF
 
 echo ""
@@ -205,13 +308,13 @@ step_end "Deployment admitted by Kyverno (image is signed)"
 # =============================================================================
 printf "\n${CYAN}${BOLD}"
 echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║  Pipeline complete                                           ║"
+echo "║  Pipeline complete                                          ║"
 echo "╠══════════════════════════════════════════════════════════════╣"
-printf "║  ${GREEN}✓ BUILD${NC}  → Image built with reproducible metadata           ║\n"
-printf "║  ${GREEN}✓ PUSH${NC}   → Image in registry                                ║\n"
-printf "║  ${GREEN}✓ SIGN${NC}   → Two signatures: Smallstep CA + Sigstore keyless  ║\n"
-printf "║  ${GREEN}✓ VERIFY${NC} → Both signatures validated                        ║\n"
-printf "║  ${GREEN}✓ DEPLOY${NC} → Kyverno admitted the signed image                ║\n"
+printf "║  ${GREEN}✓ BUILD${CYAN}${BOLD}  → Image built with reproducible metadata          ║\n"
+printf "║  ${GREEN}✓ PUSH${CYAN}${BOLD}   → Image in registry                               ║\n"
+printf "║  ${GREEN}✓ SIGN${CYAN}${BOLD}   → Two signatures: Smallstep CA + Sigstore keyless ║\n"
+printf "║  ${GREEN}✓ VERIFY${CYAN}${BOLD} → Both signatures validated                       ║\n"
+printf "║  ${GREEN}✓ DEPLOY${CYAN}${BOLD} → Kyverno admitted the signed image               ║\n"
 echo "╚══════════════════════════════════════════════════════════════╝"
 printf "${NC}\n"
 echo ""
