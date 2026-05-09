@@ -21,9 +21,9 @@ data:
   # Rekor transparency log — records all signing events
   REKOR_URL: "http://rekor-server.rekor-system.svc"
   # TUF mirror — cosign uses this to bootstrap trust roots
-  TUF_MIRROR: "http://tuf.tuf-system.svc"
+  TUF_MIRROR: "http://tuf-server.tuf-system.svc"
   # cosign uses SIGSTORE_TUF_ROOT to find the TUF root.json
-  SIGSTORE_TUF_ROOT: "http://tuf.tuf-system.svc/root.json"
+  SIGSTORE_TUF_ROOT: "http://tuf-server.tuf-system.svc/root.json"
   # Suppress cosign's warning about experimental features in keyless mode
   COSIGN_EXPERIMENTAL: "1"
 {{- end }}

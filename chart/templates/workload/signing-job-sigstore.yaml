@@ -79,13 +79,14 @@ spec:
                 --fulcio-url "$FULCIO_URL" \
                 --rekor-url "$REKOR_URL" \
                 --identity-token "$(cat /var/run/sigstore/token)" \
+                --use-signing-config=false \
                 {{ include "devsecops-demo.registryInsecureFlag" . }} \
                 --yes \
                 "$IMAGE"
 
               echo ""
               echo "=== Signature details ==="
-              cosign triangulate \
+              cosign tree \
                 {{ include "devsecops-demo.registryInsecureFlag" . }} \
                 "$IMAGE" || true
 
