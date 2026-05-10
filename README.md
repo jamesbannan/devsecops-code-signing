@@ -83,7 +83,7 @@ bash demos/demo2-smallstep/run.sh   # ~4 min — Smallstep CA signing (incl. 2-m
 bash demos/demo3-sigstore/run.sh    # ~5 min — Sigstore keyless signing
 bash demos/demo4-cicd/run.sh        # ~5 min — CI/CD pipeline simulation
 bash demos/demo5-verification/run.sh # ~5 min — Kyverno policy enforcement
-bash demos/demo6-audit/run.sh       # ~8 min — Attestations + CISO audit trail
+bash demos/demo6-audit/run.sh       # ~5 min — Attestations + CISO audit trail
 ```
 
 See `demos/README.md` for presenter tips and environment variable overrides.
@@ -170,8 +170,16 @@ Key configuration applied at runtime:
 
 The policy is restored to Audit mode on exit (including on Ctrl-C).
 
-### Demo 6
-Attestation audit trail. See `demos/README.md` for details.
+### Demo 6 — Attestation + Audit Trail (`demo6-audit/run.sh`)
+Creates and verifies an **in-toto SLSA provenance attestation** from the host,
+then assembles the full audit picture for a CISO audience. Steps demonstrated:
+- Build a provenance predicate (builder, source repo, git SHA, build time)
+- `cosign attest` with keyless signing via Fulcio + Rekor (attestation logged in tlog)
+- `cosign tree` shows signatures and attestations stored alongside the image
+- `cosign verify-attestation` confirms the provenance is cryptographically bound
+- Kyverno PolicyReports provide machine-readable admission audit logs
+- Full provenance chain: source → build → image → signature → tlog → policy
+- Formatted CISO report with identity, compliance status, and transparency log size
 
 ---
 
