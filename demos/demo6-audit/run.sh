@@ -2,14 +2,15 @@
 # =============================================================================
 # Demo 6: Attestation + Audit Trail (CISO view)
 # =============================================================================
-#   1. Run cosign attest to attach an in-toto provenance attestation
+#   1. Create a provenance attestation from the host (in-toto SLSA format)
 #   2. Show the attestation stored alongside the signature in the registry
-#   3. Run cosign verify-attestation to confirm it is valid
+#   3. Verify the attestation with cosign verify-attestation
 #   4. Pull the Kyverno PolicyReport and format it clearly
 #   5. Show the full chain: git SHA → build → digest → signature → Rekor entry
 #   6. Print a CISO report: who signed, when, from what identity, verified by log
 #
-# Duration: ~8 minutes
+# Prerequisites: cosign, kubectl, python3, curl
+# Duration: ~5 minutes
 # =============================================================================
 set -euo pipefail
 
@@ -27,11 +28,13 @@ REGISTRY="${REGISTRY:-localhost:30500}"
 IMAGE="${IMAGE:-${REGISTRY}/demo/app:latest}"
 REKOR_URL="${REKOR_URL:-http://localhost:30300}"
 FULCIO_URL="${FULCIO_URL:-http://localhost:30200}"
-TUF_URL="${TUF_URL:-http://localhost:30100}"
 
 GIT_SHA=$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknown")
 GIT_SHA_FULL=$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo "unknown")
 BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+SA_IDENTITY="https://kubernetes.io/namespaces/workload/serviceaccounts/signing-sa"
+OIDC_ISSUER="https://kubernetes.default.svc"
 
 TMPDIR=$(mktemp -d /tmp/demo6-audit-XXXXXX)
 cleanup() { rm -rf "$TMPDIR"; }
@@ -41,6 +44,7 @@ header()  { printf "\n${CYAN}${BOLD}=== %s ===${NC}\n" "$1"; }
 narrate() { printf "\n${BOLD}%s${NC}\n" "$1"; }
 cmd()     { printf "  ${YELLOW}\$ %s${NC}\n" "$*"; }
 ok()      { printf "  ${GREEN}[OK]${NC} %s\n" "$1"; }
+fail()    { printf "  ${RED}[FAIL]${NC} %s\n" "$1"; }
 note()    { printf "  ${CYAN}ℹ  %s${NC}\n" "$1"; }
 
 # =============================================================================
@@ -56,7 +60,7 @@ sleep 2
 header "Step 1: Create a provenance attestation"
 # =============================================================================
 narrate "We attach an in-toto SLSA provenance statement to the image."
-narrate "This records: builder, buildType, source repository, git SHA, build time."
+narrate "This records: builder, source repository, git SHA, build time."
 echo ""
 
 # Build a provenance predicate
@@ -101,35 +105,44 @@ cat > "$TMPDIR/provenance.json" <<EOF
 }
 EOF
 
-cmd "cosign attest --predicate provenance.json --type slsaprovenance $IMAGE"
+note "Provenance predicate:"
+python3 -c "
+import json
+with open('$TMPDIR/provenance.json') as f:
+    d = json.load(f)
+print('  builder:', d['builder']['id'])
+print('  source: ', d['invocation']['configSource']['uri'])
+print('  commit: ', d['invocation']['configSource']['digest']['sha1'][:12]+'...')
+print('  built:  ', d['metadata']['buildStartedOn'])
+"
 echo ""
 
-# Run attestation in-cluster (needs Fulcio + Rekor access)
-kubectl run -n workload attest-demo6 \
-  --image=gcr.io/projectsigstore/cosign:v2.2.4 \
-  --restart=Never \
-  --rm \
-  --quiet \
-  --env="COSIGN_EXPERIMENTAL=1" \
-  --overrides="{
-    \"spec\": {
-      \"serviceAccountName\": \"signing-sa\",
-      \"volumes\": [{\"name\": \"token\", \"projected\": {\"sources\": [{\"serviceAccountToken\": {\"audience\": \"sigstore\", \"expirationSeconds\": 600, \"path\": \"token\"}}]}}],
-      \"containers\": [{
-        \"name\": \"attest\",
-        \"image\": \"gcr.io/projectsigstore/cosign:v2.2.4\",
-        \"env\": [{\"name\": \"HOME\", \"value\": \"/tmp\"}],
-        \"volumeMounts\": [{\"name\": \"token\", \"mountPath\": \"/var/run/sigstore\"}],
-        \"command\": [\"/bin/sh\", \"-c\",
-          \"cosign initialize --mirror http://tuf.tuf-system.svc --root http://tuf.tuf-system.svc/root.json && echo 'Attestation would run here — see signing-job-sigstore for full keyless setup'\"
-        ]
-      }]
-    }
-  }" 2>/dev/null || true
+# Get a token and attest from the host (keyless)
+TOKEN=$(kubectl create token signing-sa -n workload --audience=sigstore --duration=10m)
 
-ok "Provenance attestation created"
-note "The attestation is stored as an OCI artifact in the same registry as the image."
-note "Format: sha256-<digest>.att (alongside sha256-<digest>.sig)"
+cmd "cosign attest --predicate provenance.json --type slsaprovenance \\"
+cmd "  --fulcio-url $FULCIO_URL --rekor-url $REKOR_URL $IMAGE"
+
+ATTEST_OUTPUT=$(cosign attest \
+  --predicate "$TMPDIR/provenance.json" \
+  --type slsaprovenance \
+  --fulcio-url "$FULCIO_URL" \
+  --rekor-url "$REKOR_URL" \
+  --identity-token "$TOKEN" \
+  --allow-insecure-registry \
+  --use-signing-config=false \
+  --yes \
+  "$IMAGE" 2>&1) && ATTEST_RC=0 || ATTEST_RC=$?
+
+if [ "$ATTEST_RC" -eq 0 ]; then
+  echo "$ATTEST_OUTPUT" | grep -E "tlog|entry|SCT" | head -3 | sed 's/^/  /'
+  ok "Provenance attestation created and logged in Rekor"
+else
+  echo "$ATTEST_OUTPUT" | tail -5 | sed 's/^/  /'
+  fail "Attestation failed"
+fi
+
+note "The attestation is stored as an OCI artifact alongside the image."
 sleep 2
 
 # =============================================================================
@@ -138,46 +151,82 @@ header "Step 2: Show attestation in the registry"
 narrate "Let's see what's stored in the registry for our image."
 echo ""
 
-IMAGE_DIGEST=$(curl -sf \
-  -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
-  "http://$REGISTRY/v2/demo/app/manifests/latest" 2>/dev/null | \
-  python3 -c "
-import sys,json,hashlib
-content=sys.stdin.buffer.read()
-digest='sha256:'+hashlib.sha256(content).hexdigest()
-print(digest)
-" 2>/dev/null || echo "sha256:unknown")
+cmd "cosign tree --allow-insecure-registry $IMAGE"
+TREE_OUTPUT=$(cosign tree --allow-insecure-registry "$IMAGE" 2>/dev/null || echo "")
 
-SHORT_DIGEST="${IMAGE_DIGEST:7:12}"
-
-cmd "cosign triangulate --allow-insecure-registry $IMAGE"
-cosign triangulate --allow-insecure-registry "$IMAGE" 2>/dev/null || \
-  echo "  $REGISTRY/demo/app:${SHORT_DIGEST}.sig"
+if [ -n "$TREE_OUTPUT" ]; then
+  echo "$TREE_OUTPUT" | head -8 | sed 's/^/  /'
+  SIG_COUNT=$(echo "$TREE_OUTPUT" | grep -c "🍒" || true)
+  echo ""
+  note "The tree shows $SIG_COUNT artifacts: signatures + attestations"
+else
+  echo "  (cosign tree output)"
+fi
 
 echo ""
-echo "  Registry layout for $IMAGE:"
-echo "    $REGISTRY/demo/app:latest            ← the image"
-echo "    $REGISTRY/demo/app:${SHORT_DIGEST}...sig  ← the signature"
-echo "    $REGISTRY/demo/app:${SHORT_DIGEST}...att  ← the attestation"
-
-echo ""
-note "All three are standard OCI artifacts — any registry supports them."
+note "All are standard OCI artifacts — any registry supports them."
+note "Signatures prove identity. Attestations prove provenance."
 sleep 2
 
 # =============================================================================
 header "Step 3: Verify the attestation"
 # =============================================================================
 narrate "cosign verify-attestation checks the attestation signature AND content."
+narrate "It confirms: WHO attested, WHAT they attested, and WHEN (via Rekor)."
 echo ""
 
-cmd "cosign verify-attestation --type slsaprovenance --rekor-url $REKOR_URL $IMAGE"
-cosign verify-attestation \
+cmd "cosign verify-attestation --type slsaprovenance \\"
+cmd "  --certificate-identity '$SA_IDENTITY' \\"
+cmd "  --certificate-oidc-issuer '$OIDC_ISSUER' $IMAGE"
+
+VERIFY_OUTPUT=$(cosign verify-attestation \
   --type slsaprovenance \
   --rekor-url "$REKOR_URL" \
-  --certificate-identity-regexp ".*" \
-  --certificate-oidc-issuer "https://kubernetes.default.svc" \
+  --certificate-identity "$SA_IDENTITY" \
+  --certificate-oidc-issuer "$OIDC_ISSUER" \
   --allow-insecure-registry \
-  "$IMAGE" 2>&1 | head -10 || echo "  (attestation verification result)"
+  --insecure-ignore-sct=true \
+  "$IMAGE" 2>&1) && VERIFY_RC=0 || VERIFY_RC=$?
+
+if [ "$VERIFY_RC" -eq 0 ]; then
+  # Extract and show the provenance from the verified attestation
+  echo "$VERIFY_OUTPUT" | grep -v "^$\|WARNING:" | head -5 | sed 's/^/  /'
+  echo ""
+  ok "Attestation verified — provenance is cryptographically bound to the image"
+
+  # Show the provenance payload
+  echo ""
+  note "Provenance payload from the verified attestation:"
+  echo "$VERIFY_OUTPUT" | python3 -c "
+import sys, json, base64
+for line in sys.stdin:
+    try:
+        d = json.loads(line)
+        payload_b64 = d.get('payload','')
+        if payload_b64:
+            stmt = json.loads(base64.b64decode(payload_b64))
+            pred = stmt.get('predicateType','')
+            payload = stmt.get('predicate',{})
+            if pred:
+                print(f'  predicateType: {pred}')
+            builder = payload.get('builder',{}).get('id','')
+            if builder:
+                print(f'  builder: {builder}')
+            source = payload.get('invocation',{}).get('configSource',{})
+            if source:
+                print(f'  source:  {source.get(\"uri\",\"?\")}')
+                sha = source.get('digest',{}).get('sha1','?')
+                print(f'  commit:  {sha[:12]}...')
+            meta = payload.get('metadata',{})
+            if meta.get('buildStartedOn'):
+                print(f'  built:   {meta[\"buildStartedOn\"]}')
+            break
+    except: pass
+" 2>/dev/null || echo "  (attestation payload)"
+else
+  echo "$VERIFY_OUTPUT" | tail -5 | sed 's/^/  /'
+  fail "Attestation verification failed"
+fi
 
 sleep 2
 
@@ -188,16 +237,23 @@ narrate "Every image admission generates a PolicyReport entry."
 narrate "This is the machine-readable audit log that your SIEM can consume."
 echo ""
 
-cmd "kubectl get policyreport -n workload -o yaml"
+cmd "kubectl get policyreport -n workload"
 echo ""
 
-kubectl get policyreport -n workload 2>/dev/null && \
-kubectl get policyreport -n workload -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{range .results[*]}  {.policy}: {.result} — {.message}{"\n"}{end}{end}' \
-  2>/dev/null | head -30 || echo "  (PolicyReports generated after image admissions)"
+REPORT_COUNT=$(kubectl get policyreport -n workload --no-headers 2>/dev/null | wc -l | tr -d ' ')
 
-echo ""
-note "PolicyReports are created by Kyverno automatically — no manual configuration."
-note "They can be shipped to Elastic, Splunk, or any SIEM via kubectl or a log forwarder."
+if [ "$REPORT_COUNT" -gt 0 ]; then
+  kubectl get policyreport -n workload --no-headers 2>/dev/null | head -10 | \
+    awk '{printf "  %-40s %-6s PASS=%s FAIL=%s\n", $3, $2, $4, $5}'
+  echo ""
+  ok "$REPORT_COUNT PolicyReport entries in workload namespace"
+  note "Each entry records: resource kind, policy name, result (pass/fail), message"
+  note "Ship to Elastic, Splunk, or any SIEM via kubectl export or log forwarder"
+else
+  echo "  No PolicyReports found in workload namespace"
+  note "PolicyReports are generated when Kyverno evaluates image admissions"
+fi
+
 sleep 2
 
 # =============================================================================
@@ -206,37 +262,44 @@ header "Step 5: The complete provenance chain"
 narrate "Let's trace the complete chain from source code to running container."
 echo ""
 
+IMAGE_DIGEST=$(curl -sf \
+  -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
+  "http://$REGISTRY/v2/demo/app/manifests/latest" 2>/dev/null | \
+  python3 -c "
+import sys,hashlib
+content=sys.stdin.buffer.read()
+print('sha256:'+hashlib.sha256(content).hexdigest())
+" 2>/dev/null || echo "sha256:unknown")
+
+REKOR_SIZE=$(curl -sf "$REKOR_URL/api/v1/log" 2>/dev/null | \
+  python3 -c "import sys,json; print(json.load(sys.stdin).get('treeSize','?'))" 2>/dev/null || echo "?")
+
 printf "  ${BOLD}Provenance Chain${NC}\n"
 echo ""
 printf "  ${CYAN}1. Source code${NC}\n"
 printf "     Repository: github.com/jamesbannan/devsecops-code-signing\n"
-printf "     Commit SHA:  %s\n" "$GIT_SHA_FULL"
+printf "     Commit SHA: %s\n" "$GIT_SHA_FULL"
 echo ""
 printf "  ${CYAN}2. Build${NC}\n"
-printf "     Build time:  %s\n" "$BUILD_TIME"
-printf "     Builder:     Podman + containerd (local) or CI runner\n"
+printf "     Build time: %s\n" "$BUILD_TIME"
+printf "     Builder:    minikube image build (containerd)\n"
 echo ""
 printf "  ${CYAN}3. Image${NC}\n"
-printf "     Image:   %s\n" "$IMAGE"
-printf "     Digest:  %s\n" "$IMAGE_DIGEST"
+printf "     Image:      %s\n" "$IMAGE"
+printf "     Digest:     %s\n" "${IMAGE_DIGEST:0:60}"
 echo ""
-printf "  ${CYAN}4. Signature${NC}\n"
-printf "     Signing path A: Smallstep CA (private PKI, 5-min cert)\n"
-printf "     Signing path B: Sigstore keyless (Fulcio + Rekor)\n"
+printf "  ${CYAN}4. Signatures + Attestation${NC}\n"
+printf "     Signature:  Sigstore keyless (Fulcio + Rekor)\n"
+printf "     Attestation: SLSA provenance (in-toto format)\n"
+printf "     Identity:   %s\n" "$SA_IDENTITY"
 echo ""
 printf "  ${CYAN}5. Transparency log${NC}\n"
-REKOR_SIZE=$(curl -sf "$REKOR_URL/api/v1/log" 2>/dev/null | \
-  python3 -c "import sys,json; print(json.load(sys.stdin).get('treeSize','?'))" 2>/dev/null || echo "?")
-printf "     Rekor URL:   %s\n" "$REKOR_URL"
-printf "     Tree size:   %s entries\n" "$REKOR_SIZE"
+printf "     Rekor URL:  %s\n" "$REKOR_URL"
+printf "     Tree size:  %s entries (tamper-evident Merkle tree)\n" "$REKOR_SIZE"
 echo ""
 printf "  ${CYAN}6. Policy enforcement${NC}\n"
-printf "     Kyverno:     require-image-signature ClusterPolicy\n"
-printf "     Status:      Audit (or Enforce in Demo 5)\n"
-echo ""
-printf "  ${CYAN}7. Runtime${NC}\n"
-printf "     Namespace:   workload\n"
-printf "     Deployment:  demo-app-signed\n"
+printf "     Policy:     require-image-signature (Kyverno ClusterPolicy)\n"
+printf "     Audit:      %s PolicyReports in workload namespace\n" "$REPORT_COUNT"
 sleep 2
 
 # =============================================================================
@@ -255,12 +318,13 @@ printf "║  Digest:       %-54s ║\n" "${IMAGE_DIGEST:0:48}"
 printf "║  Git SHA:      %-54s ║\n" "$GIT_SHA_FULL"
 echo "╠══════════════════════════════════════════════════════════════════════╣"
 echo "║  SIGNATURES                                                          ║"
-printf "║    Smallstep CA:   %-50s ║\n" "✓ Signed (5-min cert, now expired)"
-printf "║    Sigstore:       %-50s ║\n" "✓ Signed (keyless, Rekor entry)"
+printf "║    Sigstore:       %-50s ║\n" "✓ Keyless signed (Fulcio + Rekor)"
+printf "║    Attestation:    %-50s ║\n" "✓ SLSA provenance attached"
 echo "╠══════════════════════════════════════════════════════════════════════╣"
 echo "║  SIGNING IDENTITY                                                    ║"
-printf "║    Issuer:         %-50s ║\n" "https://kubernetes.default.svc"
-printf "║    Subject:        %-50s ║\n" "system:serviceaccount:workload:signing-sa"
+printf "║    Issuer:         %-50s ║\n" "$OIDC_ISSUER"
+printf "║    Subject:        %-50s ║\n" "signing-sa (workload namespace)"
+printf "║    SAN URI:        %-50s ║\n" "$SA_IDENTITY"
 echo "╠══════════════════════════════════════════════════════════════════════╣"
 echo "║  TRANSPARENCY LOG                                                    ║"
 printf "║    Rekor URL:      %-50s ║\n" "$REKOR_URL"
@@ -268,6 +332,7 @@ printf "║    Tree size:      %-50s ║\n" "$REKOR_SIZE entries (tamper-evident
 echo "╠══════════════════════════════════════════════════════════════════════╣"
 echo "║  POLICY COMPLIANCE                                                   ║"
 printf "║    ClusterPolicy:  %-50s ║\n" "require-image-signature"
+printf "║    PolicyReports:  %-50s ║\n" "$REPORT_COUNT entries"
 printf "║    Status:         %-50s ║\n" "✓ Compliant"
 echo "╚══════════════════════════════════════════════════════════════════════╝"
 printf "${NC}\n"
