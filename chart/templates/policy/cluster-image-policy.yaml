@@ -64,6 +64,8 @@ spec:
                 - keyless:
                     rekor:
                       url: http://rekor-server.rekor-system.svc
+                    ctlog:
+                      ignoreSCT: true
                     issuer: "https://kubernetes.default.svc"
-                    subject: "system:serviceaccount:{{ include "devsecops-demo.workloadNamespace" . }}:signing-sa"
+                    subject: "https://kubernetes.io/namespaces/{{ include "devsecops-demo.workloadNamespace" . }}/serviceaccounts/signing-sa"
 {{- end }}

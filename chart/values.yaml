@@ -274,6 +274,10 @@ kyverno:
 
   admissionController:
     replicas: 1
+    # Allow Kyverno to verify images from the local HTTP-only registry
+    container:
+      args:
+        allowInsecureRegistry: true
     resources:
       requests:
         cpu: 100m
