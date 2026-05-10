@@ -23,10 +23,12 @@ Registry v2, and Kyverno policy enforcement — all running in a local Kubernete
 | step | 0.25+ | https://smallstep.com/docs/step-cli/installation/ |
 | python3 | 3.8+ | Usually pre-installed on macOS/Linux |
 | GnuPG | 2.x | `brew install gnupg` (required for Demo 1 only) |
+| curl | — | Usually pre-installed |
 
 > **Note:** On macOS with Docker Desktop, the Docker daemon runs inside a VM and cannot
-> reach `localhost` port-forwards on the host. Registry push tests in `verify.sh` will
-> report a warning in this configuration. In-cluster workloads are unaffected.
+> reach `localhost` port-forwards on the host. The build-and-push script and demo scripts
+> automatically use `minikube image build` as the preferred build tool to avoid this
+> limitation. In-cluster workloads are unaffected.
 
 ### Step 1 — Start the cluster
 
@@ -78,9 +80,9 @@ Builds the Go demo application and pushes it to the local registry at `localhost
 ```bash
 bash demos/demo1-before/run.sh      # ~5 min — the painful baseline (GPG)
 bash demos/demo2-smallstep/run.sh   # ~4 min — Smallstep CA signing (incl. 2-min cert expiry wait)
-bash demos/demo3-sigstore/run.sh    # ~8 min — Sigstore keyless signing
-bash demos/demo4-cicd/run.sh        # ~10 min — CI/CD pipeline simulation
-bash demos/demo5-verification/run.sh # ~8 min — Kyverno policy enforcement
+bash demos/demo3-sigstore/run.sh    # ~5 min — Sigstore keyless signing
+bash demos/demo4-cicd/run.sh        # ~5 min — CI/CD pipeline simulation
+bash demos/demo5-verification/run.sh # ~5 min — Kyverno policy enforcement
 bash demos/demo6-audit/run.sh       # ~8 min — Attestations + CISO audit trail
 ```
 
@@ -136,9 +138,40 @@ signing timestamp. Key concepts demonstrated:
 - Short-lived certs limit blast radius vs long-lived GPG keys
 - Transparency log provides non-repudiation and temporal proof
 
-### Demo 3–6
-Sigstore keyless signing, CI/CD simulation, Kyverno policy enforcement, and
-attestation audit trails. See `demos/README.md` for details.
+### Demo 3 — Sigstore Keyless Signing (`demo3-sigstore/run.sh`)
+Performs **keyless signing** from the host using Fulcio and Rekor — no keys exist
+anywhere, not even temporarily on disk. The OIDC token from the Kubernetes
+ServiceAccount is the only identity credential. Steps demonstrated:
+- Decode the JWT token to show issuer, subject, audience
+- `cosign sign` with `--fulcio-url` and `--rekor-url` (ephemeral key pair in memory)
+- Extract the Fulcio-issued certificate from the signature (URI SAN identity)
+- Verify with explicit `--certificate-identity` and `--certificate-oidc-issuer`
+- Query the Rekor API directly to show the raw transparency log entry
+
+### Demo 4 — CI/CD Pipeline Simulation (`demo4-cicd/run.sh`)
+Simulates a **GitHub Actions workflow** locally with CI-style step output.
+Runs the full pipeline: BUILD → PUSH → SIGN (both paths) → VERIFY → DEPLOY.
+Both Smallstep and Sigstore keyless signing are performed from the host.
+The final step deploys a signed image to the workload namespace — Kyverno
+admits it (in Audit mode) and the pod runs successfully.
+
+### Demo 5 — Kyverno Policy Enforcement (`demo5-verification/run.sh`)
+Switches Kyverno from **Audit to Enforce mode** and demonstrates the policy gate.
+First configures the ClusterPolicy with the local Fulcio root certificate and
+Rekor public key, then:
+- Deploys an **unsigned** image → **BLOCKED** by Kyverno's admission webhook
+- Deploys a **signed** image → **ADMITTED** and running
+
+Key configuration applied at runtime:
+- Fulcio root cert for local CA chain verification
+- Rekor public key for local transparency log verification
+- `ignoreSCT: true` (local Fulcio has no public CT log)
+- `mutateDigest: true` in Enforce mode (resolves tags to digests)
+
+The policy is restored to Audit mode on exit (including on Ctrl-C).
+
+### Demo 6
+Attestation audit trail. See `demos/README.md` for details.
 
 ---
 
@@ -156,6 +189,26 @@ The in-cluster signing job (`signing-job-smallstep`) uses the **JWK provisioner*
 (`workload-signer`) with a provisioner password stored as a Kubernetes Secret.
 Signatures are uploaded to the local Rekor transparency log, enabling verification
 even after the signing certificate has expired.
+
+### Kyverno Policy Configuration
+
+The `require-image-signature` ClusterPolicy verifies cosign signatures on images
+deployed to the workload namespace. For Enforce mode to work with a local Sigstore
+stack, the policy requires:
+
+- **Fulcio root certificate** (`roots`) — the local Fulcio CA cert, sourced from the
+  `fulcio-pub-key` Secret in `fulcio-system`
+- **Rekor public key** (`rekor.pubkey`) — the local Rekor signing key, sourced from the
+  `rekor-public-key` Secret in `tuf-system`
+- **`ctlog.ignoreSCT: true`** — local Fulcio doesn't submit to a public CT log
+- **`allowInsecureRegistry: true`** — the local registry is HTTP-only
+
+The policy's `subject` field matches the Fulcio certificate **URI SAN** format
+(`https://kubernetes.io/namespaces/workload/serviceaccounts/signing-sa`), not the
+OIDC `sub` claim (`system:serviceaccount:workload:signing-sa`).
+
+Demo 5 applies these settings at runtime. In a production deployment, they would be
+baked into the Helm chart values.
 
 ---
 
@@ -261,9 +314,11 @@ The `scripts/verify.sh` script checks all of the following:
 
 | Issue | Impact | Workaround |
 |-------|--------|------------|
-| **Docker Desktop VM networking** (macOS) | `docker push localhost:30500` fails because the daemon runs inside a HyperKit/QEMU VM that cannot reach host port-forwards | Use `crane` (runs on host) or push from inside the cluster. In-cluster workloads are unaffected. |
+| **Docker Desktop VM networking** (macOS) | `docker push localhost:30500` fails because the daemon runs inside a HyperKit/QEMU VM that cannot reach host port-forwards | Scripts auto-detect minikube and use `minikube image build` + `ctr push` via ClusterIP. |
 | **Trillian MySQL slow start** (Apple Silicon) | MySQL may take 2–3 minutes to pass readiness probes on ARM64 | `install.sh` allows up to 10 minutes. Probe timeouts are tuned in `values.yaml`. |
 | **Workload Job warnings** | Checks 15/16/18 in `verify.sh` warn until the demo image exists | Run `demos/demo-app/build-and-push.sh` first, then re-run `verify.sh`. |
+| **cosign v3 bundle format** | Kyverno v1.15 doesn't fully support cosign v3's OCI referrer-based signatures | Demo5 re-signs with `--new-bundle-format=false` for Kyverno compatibility. |
+| **Kyverno + local Sigstore** | ClusterPolicy needs Fulcio root cert, Rekor pubkey, and `ignoreSCT: true` for local infrastructure | Demo5 patches the policy at runtime; values are sourced from cluster Secrets. |
 
 ---
 
