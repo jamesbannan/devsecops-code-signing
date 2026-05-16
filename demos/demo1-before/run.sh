@@ -59,6 +59,25 @@ cmd()     { printf "  ${YELLOW}\$ %s${NC}\n" "$*"; }
 ok()      { printf "  ${GREEN}[OK]${NC} %s\n" "$1"; }
 note()    { printf "  ${RED}⚠  %s${NC}\n" "$1"; }
 
+printf "\n${RED}${BOLD}"
+cat <<'BANNER'
+═══════════════════════════════════════════════════════════════════════════════
+  ▶▶▶  DEMO 1  ·  THE PAINFUL BASELINE
+═══════════════════════════════════════════════════════════════════════════════
+
+  Manual GPG signing, the way container images used to be signed.
+
+  · Generate an ephemeral GPG key pair in a temp directory
+  · Manually sign a container image digest with that key
+  · Inspect the resulting detached .sig file
+  · Call out the pain: no audit trail, no expiry, key lives forever
+
+  Duration: ~5 min       Audience takeaway: this is what we're replacing.
+═══════════════════════════════════════════════════════════════════════════════
+BANNER
+printf "${NC}\n"
+sleep 1
+
 # =============================================================================
 header "Demo 1: The Painful Baseline"
 # =============================================================================

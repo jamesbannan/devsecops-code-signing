@@ -77,12 +77,29 @@ ok()         { printf "  ${GREEN}[OK]${NC} %s\n" "$1"; }
 fail()       { printf "  ${RED}[FAIL]${NC} %s\n" "$1"; }
 note()       { printf "  ${CYAN}ℹ  %s${NC}\n" "$1"; }
 
-printf "\n${CYAN}${BOLD}"
-echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║  DevSecOps Demo — CI/CD Pipeline Simulation                 ║"
-echo "║  Commit: $GIT_SHA  Time: $BUILD_TIME ║"
-echo "╚══════════════════════════════════════════════════════════════╝"
+printf "\n${GREEN}${BOLD}"
+cat <<'BANNER'
+═══════════════════════════════════════════════════════════════════════════════
+  ▶▶▶  DEMO 4  ·  CI/CD PIPELINE SIMULATION
+═══════════════════════════════════════════════════════════════════════════════
+
+  GitHub Actions workflow, played out locally. Signing is automatic.
+
+  · BUILD   Build the demo app container image with reproducible metadata
+  · PUSH    Push it to the local in-cluster registry
+  · SIGN    Sign with BOTH paths (Smallstep cert + Sigstore keyless)
+  · VERIFY  cosign verify both signatures; identity assertions checked
+  · DEPLOY  Apply a Deployment; Kyverno admits the signed image
+
+BANNER
+printf "║  Commit: %s  Time: %s ║\n" "$GIT_SHA" "$BUILD_TIME"
+cat <<'BANNER'
+
+  Duration: ~5 min       The pipeline does the signing, not a human.
+═══════════════════════════════════════════════════════════════════════════════
+BANNER
 printf "${NC}\n"
+sleep 1
 
 narrate "This simulates a GitHub Actions workflow. Each step mirrors a real pipeline."
 narrate "The key difference: signing is automatic, not manual."

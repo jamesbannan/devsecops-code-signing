@@ -63,6 +63,26 @@ ok()      { printf "  ${GREEN}[OK]${NC} %s\n" "$1"; }
 fail()    { printf "  ${RED}[FAIL]${NC} %s\n" "$1"; }
 note()    { printf "  ${CYAN}ℹ  %s${NC}\n" "$1"; }
 
+printf "\n${YELLOW}${BOLD}"
+cat <<'BANNER'
+═══════════════════════════════════════════════════════════════════════════════
+  ▶▶▶  DEMO 2  ·  SMALLSTEP CA SIGNING PATH
+═══════════════════════════════════════════════════════════════════════════════
+
+  Private PKI · short-lived certs · cosign-signed images.
+
+  · Check step-ca health and list its provisioners
+  · Request a 2-minute code-signing cert from step-ca
+  · Inspect the cert (issuer, subject, EKU, expiry)
+  · Sign the image with cosign + that cert; store the signature in the registry
+  · Wait for the cert to expire, then verify; still passes, signed-in-time wins
+
+  Duration: ~4 min (includes a 2-minute wait for cert expiry)
+═══════════════════════════════════════════════════════════════════════════════
+BANNER
+printf "${NC}\n"
+sleep 1
+
 # =============================================================================
 header "Demo 2: Smallstep CA Signing Path"
 # =============================================================================

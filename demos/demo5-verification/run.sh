@@ -54,6 +54,28 @@ fail()    { printf "  ${RED}[FAIL]${NC} %s\n" "$1"; }
 blocked() { printf "  ${RED}[BLOCKED BY KYVERNO]${NC} %s\n" "$1"; }
 note()    { printf "  ${CYAN}ℹ  %s${NC}\n" "$1"; }
 
+MAGENTA='\033[0;35m'
+
+printf "\n${MAGENTA}${BOLD}"
+cat <<'BANNER'
+═══════════════════════════════════════════════════════════════════════════════
+  ▶▶▶  DEMO 5  ·  POLICY GATE · KYVERNO IN ENFORCE MODE
+═══════════════════════════════════════════════════════════════════════════════
+
+  The cluster only admits images it can cryptographically verify.
+
+  · Configure Kyverno policy for the local Sigstore (Fulcio root, Rekor key)
+  · Switch the cluster policy from Audit to Enforce
+  · Attempt to deploy an UNSIGNED image; Kyverno blocks it at admission
+  · Deploy a CORRECTLY signed image; admission allows it, pod runs
+  · Restore Audit mode on exit (idempotent cleanup)
+
+  Duration: ~5 min       Verification is a wall, not a suggestion.
+═══════════════════════════════════════════════════════════════════════════════
+BANNER
+printf "${NC}\n"
+sleep 1
+
 # Pre-clean any stale test objects from a previous run, then start fresh.
 # The unsigned-test pod is expected to be blocked (never admitted) but a prior
 # successful signed-test deployment from a previous run would shadow today's.

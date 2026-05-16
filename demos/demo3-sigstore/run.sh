@@ -64,6 +64,26 @@ ok()      { printf "  ${GREEN}[OK]${NC} %s\n" "$1"; }
 fail()    { printf "  ${RED}[FAIL]${NC} %s\n" "$1"; }
 note()    { printf "  ${CYAN}ℹ  %s${NC}\n" "$1"; }
 
+printf "\n${CYAN}${BOLD}"
+cat <<'BANNER'
+═══════════════════════════════════════════════════════════════════════════════
+  ▶▶▶  DEMO 3  ·  SIGSTORE KEYLESS SIGNING
+═══════════════════════════════════════════════════════════════════════════════
+
+  OIDC identity · ephemeral Fulcio certs · transparent Rekor log.
+
+  · Decode the OIDC token (issuer, subject, audience)
+  · Keyless sign; Fulcio issues a 10-minute cert, Rekor logs the event
+  · Show the Rekor transparency-log entry (log index, tree size)
+  · Extract the cert from the signature; show who signed, when, from where
+  · Verify with explicit identity assertions; pull the raw Rekor entry
+
+  Duration: ~5 min       No long-lived keys exist at any point.
+═══════════════════════════════════════════════════════════════════════════════
+BANNER
+printf "${NC}\n"
+sleep 1
+
 # =============================================================================
 header "Demo 3: Sigstore Keyless Signing"
 # =============================================================================

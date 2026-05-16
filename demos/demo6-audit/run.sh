@@ -68,6 +68,27 @@ ok()      { printf "  ${GREEN}[OK]${NC} %s\n" "$1"; }
 fail()    { printf "  ${RED}[FAIL]${NC} %s\n" "$1"; }
 note()    { printf "  ${CYAN}ℹ  %s${NC}\n" "$1"; }
 
+printf "\n${BOLD}"
+cat <<'BANNER'
+═══════════════════════════════════════════════════════════════════════════════
+  ▶▶▶  DEMO 6  ·  ATTESTATION + AUDIT TRAIL · THE CISO VIEW
+═══════════════════════════════════════════════════════════════════════════════
+
+  Provenance, policy, and a transparency log; the full evidence chain.
+
+  · Create an in-toto SLSA provenance attestation for the running image
+  · Show it stored alongside the signature in the registry
+  · cosign verify-attestation; predicate type and identity both checked
+  · Pull the Kyverno PolicyReport for the workload namespace
+  · Render the full chain: git SHA → build → digest → signature → Rekor entry
+  · Print a CISO-ready report: who signed, when, from what identity
+
+  Duration: ~5 min       Every answer the audit team asks, already on disk.
+═══════════════════════════════════════════════════════════════════════════════
+BANNER
+printf "${NC}\n"
+sleep 1
+
 # =============================================================================
 header "Demo 6: Attestation + Audit Trail"
 # =============================================================================
