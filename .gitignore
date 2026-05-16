@@ -3,3 +3,6 @@ chart/values-aks.local.yaml
 
 # macOS
 .DS_Store
+
+# Node
+node_modules/
