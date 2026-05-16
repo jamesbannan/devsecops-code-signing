@@ -22,12 +22,14 @@
 #   3. `helm uninstall` the demo release with --no-hooks (skip post-delete
 #      hooks that may try to call the missing Kyverno webhook).
 #   4. Force-delete pods, jobs, deployments, replicasets, statefulsets in
-#      each demo namespace (--grace-period=0 --force).
+#      each demo namespace (--grace-period=0 --force); drop finalizers on
+#      any stragglers and retry.
 #   5. Patch out finalizers on PVCs so persistent volumes can release.
 #   6. Delete demo CRDs that don't carry user data (Kyverno policy reports,
 #      Sigstore TUF, etc.). Optional via PURGE_CRDS=true.
-#   7. Wait for namespaces to fully terminate; patch out namespace finalizers
-#      if they remain Terminating after the timeout.
+#   7. Delete each demo namespace and wait for them to fully terminate;
+#      patch out namespace finalizers if any remain Terminating after the
+#      timeout.
 #
 # Environment variables:
 #   RELEASE_NAME      Helm release name (default: devsecops-demo)
@@ -172,6 +174,24 @@ for ns in "${DEMO_NAMESPACES[@]}"; do
     | grep -v "^Warning: Immediate" | sed 's/^/    /' | head -10 || true
   kubectl delete pods --all -n "$ns" --grace-period=0 --force --ignore-not-found 2>&1 \
     | grep -v "^Warning: Immediate" | sed 's/^/    /' | head -10 || true
+
+  # Anything left? Drop finalizers and retry. Common cause: stuck PolicyReports
+  # in workload/policy, or deployments holding a Kyverno-related finalizer
+  # after the webhook is gone.
+  LEFTOVER=$(kubectl get deployments,statefulsets,daemonsets,replicasets,jobs,cronjobs,pods \
+    -n "$ns" -o name 2>/dev/null | wc -l | tr -d ' ')
+  if [ "${LEFTOVER:-0}" -gt 0 ]; then
+    warn "$ns still has $LEFTOVER workload object(s) — clearing finalizers"
+    kubectl get deployments,statefulsets,daemonsets,replicasets,jobs,cronjobs,pods \
+      -n "$ns" -o name 2>/dev/null \
+      | while read -r obj; do
+          [ -z "$obj" ] && continue
+          kubectl patch "$obj" -n "$ns" --type=merge \
+            -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 || true
+          kubectl delete "$obj" -n "$ns" --grace-period=0 --force \
+            --ignore-not-found >/dev/null 2>&1 || true
+        done
+  fi
 done
 ok "Workload deletion submitted"
 
@@ -229,8 +249,16 @@ else
 fi
 
 # =============================================================================
-# 7. Wait for namespaces, force-finalize stragglers
+# 7. Delete demo namespaces, then wait for them to fully terminate
 # =============================================================================
+header "Deleting demo namespaces"
+for ns in "${DEMO_NAMESPACES[@]}"; do
+  kubectl get ns "$ns" >/dev/null 2>&1 || continue
+  kubectl delete ns "$ns" --ignore-not-found --wait=false --timeout=30s \
+    >/dev/null 2>&1 && info "Delete submitted: $ns" \
+    || warn "Could not submit delete for $ns (continuing)"
+done
+
 header "Waiting for namespaces to terminate (up to ${NS_WAIT_SECONDS}s)"
 end=$((SECONDS + NS_WAIT_SECONDS))
 while [ $SECONDS -lt $end ]; do
