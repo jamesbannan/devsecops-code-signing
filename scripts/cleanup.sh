@@ -173,17 +173,27 @@ fi
 header "Force-deleting demo workloads"
 for ns in "${DEMO_NAMESPACES[@]}"; do
   info "Cleaning namespace: $ns"
+
+  # 1. Drop finalizers on every pod first. `kubectl delete --force` does
+  #    NOT bypass finalizers — if a Kyverno/admission finalizer is set, the
+  #    delete request hangs waiting for the object to leave etcd.
+  kubectl get pods -n "$ns" -o name 2>/dev/null | while read -r p; do
+    [ -z "$p" ] && continue
+    kubectl patch "$p" -n "$ns" --type=merge \
+      -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 || true
+  done
+
+  # 2. Submit deletes with --wait=false so kubectl returns immediately
+  #    even if something is still terminating asynchronously.
   kubectl delete jobs,deployments,replicasets,statefulsets,daemonsets,cronjobs \
-    --all -n "$ns" --grace-period=0 --force --ignore-not-found 2>&1 \
+    --all -n "$ns" --grace-period=0 --force --ignore-not-found --wait=false 2>&1 \
     | grep -v "^Warning: Immediate" | grep -v "^No resources found" \
     | sed 's/^/    /' | head -10 || true
-  kubectl delete pods --all -n "$ns" --grace-period=0 --force --ignore-not-found 2>&1 \
+  kubectl delete pods --all -n "$ns" --grace-period=0 --force --ignore-not-found --wait=false 2>&1 \
     | grep -v "^Warning: Immediate" | grep -v "^No resources found" \
     | sed 's/^/    /' | head -10 || true
 
-  # Anything left? Drop finalizers and retry. Common cause: stuck PolicyReports
-  # in workload/policy, or deployments holding a Kyverno-related finalizer
-  # after the webhook is gone.
+  # 3. Anything left? Drop finalizers and retry once more.
   LEFTOVER=$(kubectl get deployments,statefulsets,daemonsets,replicasets,jobs,cronjobs,pods \
     -n "$ns" -o name 2>/dev/null | wc -l | tr -d ' ')
   if [ "${LEFTOVER:-0}" -gt 0 ]; then
@@ -195,7 +205,7 @@ for ns in "${DEMO_NAMESPACES[@]}"; do
           kubectl patch "$obj" -n "$ns" --type=merge \
             -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 || true
           kubectl delete "$obj" -n "$ns" --grace-period=0 --force \
-            --ignore-not-found >/dev/null 2>&1 || true
+            --ignore-not-found --wait=false >/dev/null 2>&1 || true
         done
   fi
 done
