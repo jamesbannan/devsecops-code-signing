@@ -6,3 +6,6 @@ chart/values-aks.local.yaml
 
 # Node
 node_modules/
+
+# Local scratch / source assets not part of the repo
+temp/
