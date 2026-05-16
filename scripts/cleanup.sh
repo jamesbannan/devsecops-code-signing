@@ -165,15 +165,21 @@ fi
 # =============================================================================
 # 4. Force-delete workloads in demo namespaces
 # =============================================================================
+# Note: we do NOT pre-check `kubectl get ns <ns>`. On AKS with Azure RBAC, a
+# user may have list/get on Deployments inside a namespace but NOT have get
+# on the namespace object itself — that pre-check would silently skip every
+# namespace and the cleanup would be a no-op. Delete commands are idempotent
+# with --ignore-not-found, so we just attempt them unconditionally.
 header "Force-deleting demo workloads"
 for ns in "${DEMO_NAMESPACES[@]}"; do
-  kubectl get ns "$ns" >/dev/null 2>&1 || continue
   info "Cleaning namespace: $ns"
   kubectl delete jobs,deployments,replicasets,statefulsets,daemonsets,cronjobs \
     --all -n "$ns" --grace-period=0 --force --ignore-not-found 2>&1 \
-    | grep -v "^Warning: Immediate" | sed 's/^/    /' | head -10 || true
+    | grep -v "^Warning: Immediate" | grep -v "^No resources found" \
+    | sed 's/^/    /' | head -10 || true
   kubectl delete pods --all -n "$ns" --grace-period=0 --force --ignore-not-found 2>&1 \
-    | grep -v "^Warning: Immediate" | sed 's/^/    /' | head -10 || true
+    | grep -v "^Warning: Immediate" | grep -v "^No resources found" \
+    | sed 's/^/    /' | head -10 || true
 
   # Anything left? Drop finalizers and retry. Common cause: stuck PolicyReports
   # in workload/policy, or deployments holding a Kyverno-related finalizer
@@ -200,7 +206,6 @@ ok "Workload deletion submitted"
 # =============================================================================
 header "Releasing PVC finalizers"
 for ns in "${DEMO_NAMESPACES[@]}"; do
-  kubectl get ns "$ns" >/dev/null 2>&1 || continue
   PVCS=()
   while IFS= read -r line; do [ -n "$line" ] && PVCS+=("$line"); done \
     < <(kubectl get pvc -n "$ns" -o name 2>/dev/null || true)
@@ -253,10 +258,12 @@ fi
 # =============================================================================
 header "Deleting demo namespaces"
 for ns in "${DEMO_NAMESPACES[@]}"; do
-  kubectl get ns "$ns" >/dev/null 2>&1 || continue
-  kubectl delete ns "$ns" --ignore-not-found --wait=false --timeout=30s \
-    >/dev/null 2>&1 && info "Delete submitted: $ns" \
-    || warn "Could not submit delete for $ns (continuing)"
+  if kubectl delete ns "$ns" --ignore-not-found --wait=false --timeout=30s \
+       >/dev/null 2>&1; then
+    info "Delete submitted: $ns"
+  else
+    warn "Could not submit delete for $ns (continuing)"
+  fi
 done
 
 header "Waiting for namespaces to terminate (up to ${NS_WAIT_SECONDS}s)"
@@ -264,7 +271,13 @@ end=$((SECONDS + NS_WAIT_SECONDS))
 while [ $SECONDS -lt $end ]; do
   remaining=()
   for ns in "${DEMO_NAMESPACES[@]}"; do
-    kubectl get ns "$ns" >/dev/null 2>&1 && remaining+=("$ns")
+    # `kubectl get ns` may fail under Azure RBAC even when the namespace
+    # exists. Use a namespaced query that the user is likelier to have
+    # access to as a liveness check instead.
+    if kubectl get sa default -n "$ns" >/dev/null 2>&1 \
+       || kubectl get configmap kube-root-ca.crt -n "$ns" >/dev/null 2>&1; then
+      remaining+=("$ns")
+    fi
   done
   if [ ${#remaining[@]} -eq 0 ]; then
     ok "All demo namespaces terminated"
@@ -278,8 +291,11 @@ done
 # via the namespace's /finalize subresource — the last-resort escape hatch.
 STUCK=()
 for ns in "${DEMO_NAMESPACES[@]}"; do
-  status=$(kubectl get ns "$ns" -o jsonpath='{.status.phase}' 2>/dev/null || true)
-  [ "$status" = "Terminating" ] && STUCK+=("$ns")
+  # Best-effort detection — if either get works, the namespace is still around
+  if kubectl get sa default -n "$ns" >/dev/null 2>&1 \
+     || kubectl get configmap kube-root-ca.crt -n "$ns" >/dev/null 2>&1; then
+    STUCK+=("$ns")
+  fi
 done
 if [ ${#STUCK[@]} -gt 0 ]; then
   warn "Forcibly clearing finalizers on stuck namespaces: ${STUCK[*]}"
@@ -311,7 +327,10 @@ fi
 header "Cleanup summary"
 LEFT=()
 for ns in "${DEMO_NAMESPACES[@]}"; do
-  kubectl get ns "$ns" >/dev/null 2>&1 && LEFT+=("$ns")
+  if kubectl get sa default -n "$ns" >/dev/null 2>&1 \
+     || kubectl get configmap kube-root-ca.crt -n "$ns" >/dev/null 2>&1; then
+    LEFT+=("$ns")
+  fi
 done
 if [ ${#LEFT[@]} -eq 0 ]; then
   ok "All demo namespaces removed"
