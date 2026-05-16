@@ -340,6 +340,14 @@ workload:
   # Switch to Enforce during Demo 5 (see demos/demo5-verification/run.sh).
   policy:
     validationFailureAction: Audit
+    # Whether to render the Kyverno ClusterPolicy (require-image-signature).
+    # Default false: scripts/install.sh applies it via a follow-up
+    # `helm upgrade --reuse-values --set workload.policy.installClusterPolicy=true`
+    # AFTER Kyverno's admission webhook is verified Ready, to avoid the
+    # "no endpoints available for service ...kyverno-svc" race on slower
+    # clusters (notably AKS cold starts). Set to true to bundle the policy
+    # in a single helm install at your own risk.
+    installClusterPolicy: false
 
 # =============================================================================
 # Host-side port access (NodePort / port-forward for local cosign CLI)

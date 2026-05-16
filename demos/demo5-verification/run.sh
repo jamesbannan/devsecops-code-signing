@@ -23,13 +23,30 @@ RED='\033[0;31m'
 BOLD='\033[1m'
 NC='\033[0m'
 
+# shellcheck source=../../scripts/_cluster-detect.sh
+source "$REPO_ROOT/scripts/_cluster-detect.sh"
+
 REGISTRY="${REGISTRY:-localhost:30500}"
 IMAGE="${IMAGE:-${REGISTRY}/demo/app:latest}"
-CLUSTER_IMAGE="registry.registry.svc:5000/demo/app:latest"
+CLUSTER_IMAGE="${CLUSTER_REGISTRY}/demo/app:latest"
 REKOR_URL="${REKOR_URL:-http://localhost:30300}"
 FULCIO_URL="${FULCIO_URL:-http://localhost:30200}"
 
-header()  { printf "\n${CYAN}${BOLD}=== %s ===${NC}\n" "$1"; }
+# Pause between steps so the audience can absorb each phase. Set DEMO_AUTO=1
+# to skip (e.g. when invoked from scripts/verify.sh or CI); skipped automatically
+# when stdin is not a TTY.
+DEMO_AUTO="${DEMO_AUTO:-0}"
+_STEP_COUNT=0
+pause_for_next() {
+  _STEP_COUNT=$((_STEP_COUNT + 1))
+  [ "$_STEP_COUNT" -eq 1 ] && return 0
+  [ "$DEMO_AUTO" = "1" ] && return 0
+  [ -t 0 ] || return 0
+  printf "\n${YELLOW}  ↵  Press ENTER for the next step (Ctrl-C to stop)…${NC} "
+  IFS= read -r _ || true
+}
+
+header()  { pause_for_next; printf "\n${CYAN}${BOLD}=== %s ===${NC}\n" "$1"; }
 narrate() { printf "\n${BOLD}%s${NC}\n" "$1"; }
 cmd()     { printf "  ${YELLOW}\$ %s${NC}\n" "$*"; }
 ok()      { printf "  ${GREEN}[OK]${NC} %s\n" "$1"; }
@@ -37,7 +54,15 @@ fail()    { printf "  ${RED}[FAIL]${NC} %s\n" "$1"; }
 blocked() { printf "  ${RED}[BLOCKED BY KYVERNO]${NC} %s\n" "$1"; }
 note()    { printf "  ${CYAN}ℹ  %s${NC}\n" "$1"; }
 
-# Restore Audit mode on exit (idempotent)
+# Pre-clean any stale test objects from a previous run, then start fresh.
+# The unsigned-test pod is expected to be blocked (never admitted) but a prior
+# successful signed-test deployment from a previous run would shadow today's.
+kubectl delete deployment signed-test -n workload --ignore-not-found=true 2>/dev/null || true
+kubectl delete pod unsigned-test signed-test -n workload --ignore-not-found=true 2>/dev/null || true
+
+# Restore Audit mode on exit (idempotent) but LEAVE the signed-test deployment
+# running so the audience can point at `kubectl get deployment -n workload`
+# after the demo to confirm Kyverno admitted the signed image.
 cleanup() {
   echo ""
   printf "  ${YELLOW}Restoring Kyverno policy to Audit mode ...${NC}\n"
@@ -47,12 +72,11 @@ cleanup() {
   kubectl patch clusterpolicy require-image-signature \
     --type=merge \
     -p '{"spec":{"validationFailureAction":"Audit"}}' 2>/dev/null || true
-  # Clean up any test deployments/pods
-  kubectl delete deployment signed-test \
-    -n workload --ignore-not-found=true 2>/dev/null || true
-  kubectl delete pod unsigned-test signed-test \
-    -n workload --ignore-not-found=true 2>/dev/null || true
+  # Clean up the failed unsigned-test pod only — leave signed-test running.
+  kubectl delete pod unsigned-test -n workload --ignore-not-found=true 2>/dev/null || true
   printf "  ${GREEN}[OK]${NC} Policy restored to Audit mode\n"
+  printf "  ${CYAN}ℹ  signed-test deployment left running for inspection:${NC}\n"
+  printf "     ${CYAN}kubectl get deployment signed-test -n workload${NC}\n"
 }
 trap cleanup EXIT
 
@@ -84,6 +108,12 @@ if [ -z "$FULCIO_ROOT" ] || [ -z "$REKOR_PUB" ]; then
   exit 1
 fi
 
+if [ "${CLUSTER_KIND:-}" = "aks" ] && [ -n "${AKS_OIDC_ISSUER_URL:-}" ]; then
+  KEYLESS_ISSUER="$AKS_OIDC_ISSUER_URL"
+else
+  KEYLESS_ISSUER="https://kubernetes.default.svc"
+fi
+
 # Patch the ClusterPolicy with local Sigstore credentials
 cmd "kubectl patch clusterpolicy require-image-signature (add Fulcio root + Rekor pubkey)"
 python3 -c "
@@ -91,10 +121,11 @@ import json, subprocess, sys
 
 fulcio_root = '''$FULCIO_ROOT'''
 rekor_pub = '''$REKOR_PUB'''
+issuer = '''$KEYLESS_ISSUER'''
 
 patch = json.dumps([
     {'op': 'replace', 'path': '/spec/rules/0/verifyImages/0/attestors/0/entries/0/keyless', 'value': {
-        'issuer': 'https://kubernetes.default.svc',
+        'issuer': issuer,
         'subject': 'https://kubernetes.io/namespaces/workload/serviceaccounts/signing-sa',
         'roots': fulcio_root,
         'rekor': {
@@ -186,15 +217,24 @@ FROM busybox:latest
 CMD ["echo", "I am unsigned"]
 DOCKERFILE
 
-UNSIGNED_IMAGE="registry.registry.svc:5000/demo/unsigned:latest"
+UNSIGNED_IMAGE="${CLUSTER_REGISTRY}/demo/unsigned:latest"
 
-if command -v minikube &>/dev/null && minikube status --format='{{.Host}}' 2>/dev/null | grep -q Running; then
+if [ "$CLUSTER_KIND" = "minikube" ] && command -v minikube &>/dev/null && minikube status --format='{{.Host}}' 2>/dev/null | grep -q Running; then
   REGISTRY_IP=$(kubectl get svc registry -n registry -o jsonpath='{.spec.clusterIP}')
   minikube image build -t "$UNSIGNED_IMAGE" "$UNSIGNED_DIR" 2>/dev/null
   PUSH_REF="${REGISTRY_IP}:5000/demo/unsigned:latest"
   minikube ssh -- "sudo ctr -n k8s.io images tag '$UNSIGNED_IMAGE' '$PUSH_REF'" 2>/dev/null || true
   minikube ssh -- "sudo ctr -n k8s.io images push --plain-http '$PUSH_REF'" >/dev/null 2>&1
   ok "Unsigned image pushed: demo/unsigned:latest"
+elif [ "$CLUSTER_KIND" = "aks" ]; then
+  if command -v docker &>/dev/null; then
+    az acr login -n "$ACR_NAME" --only-show-errors
+    docker build -t "$UNSIGNED_IMAGE" "$UNSIGNED_DIR" >/dev/null 2>&1
+    docker push "$UNSIGNED_IMAGE" >/dev/null 2>&1
+    ok "Unsigned image pushed to ACR: demo/unsigned:latest"
+  else
+    note "Docker not available — skipping unsigned image push"
+  fi
 fi
 rm -rf "$UNSIGNED_DIR"
 
@@ -226,8 +266,9 @@ narrate "Same image as Demo 3/4 — properly signed via Sigstore keyless path."
 narrate "Kyverno verifies the Fulcio cert + Rekor tlog entry at admission time."
 echo ""
 
-# Ensure containerd can pull from registry.registry.svc:5000 via ClusterIP
-if command -v minikube &>/dev/null; then
+# Ensure containerd can pull from registry.registry.svc:5000 via ClusterIP (minikube only;
+# on AKS, kubelet pulls from ACR via the managed identity wired up by the AVM module).
+if [ "$CLUSTER_KIND" = "minikube" ] && command -v minikube &>/dev/null; then
   REGISTRY_IP=$(kubectl get svc registry -n registry -o jsonpath='{.spec.clusterIP}')
   minikube ssh -- "sudo mkdir -p /etc/containerd/certs.d/registry.registry.svc:5000" 2>/dev/null
   minikube ssh -- "echo 'server = \"http://registry.registry.svc:5000\"
@@ -261,7 +302,7 @@ spec:
       containers:
         - name: app
           image: $CLUSTER_IMAGE
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           env:
             - name: IMAGE_SIGNED
               value: "true"

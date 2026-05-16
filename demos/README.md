@@ -5,28 +5,78 @@ Six end-to-end demonstrations for the BSides Melbourne 2026 talk:
 
 ## Prerequisites
 
-All demos require the environment to be running:
+All demos require the environment to be running. Pick a target:
+
+**Local minikube:**
 
 ```bash
-bash scripts/start-minikube.sh   # Start the cluster
-bash scripts/install.sh          # Deploy all components
-bash scripts/verify.sh           # Confirm everything is healthy
+bash scripts/start-minikube.sh         # Start the cluster
+bash scripts/install.sh                # Deploy all components
+bash scripts/verify.sh                 # Confirm everything is healthy
 bash demos/demo-app/build-and-push.sh  # Build and push the demo image
+                                       # (required for demos 2, 3, 6; see matrix below)
 ```
+
+**Azure AKS:**
+
+```bash
+az login && az account set --subscription <name|id>
+bash scripts/aks-up.sh                 # terraform apply + render values-aks.local.yaml
+bash scripts/install.sh                # auto-picks chart/values-aks.local.yaml
+bash scripts/verify.sh
+bash demos/demo-app/build-and-push.sh  # builds + az acr login + docker push to ACR
+                                       # (required for demos 2, 3, 6; see matrix below)
+```
+
+All demo scripts source `scripts/_cluster-detect.sh` and adapt automatically — no flags
+to pass. They detect `CLUSTER_KIND` (`minikube` or `aks`), pick the right registry, and
+use the correct OIDC issuer when verifying signatures.
+
+### Per-demo image prerequisites
+
+`demos/demo-app/build-and-push.sh` produces `${REGISTRY}/demo/app:latest`. Which demos
+need it pre-built?
+
+| Demo | Needs `demo/app:latest` already in registry? | Why |
+|------|---------------------------------------------|-----|
+| 1 — GPG baseline   | Optional (falls back to placeholder digest) | Pedagogical — demonstrates manual GPG flow |
+| 2 — Smallstep      | **Yes** | `cosign sign` against an existing image |
+| 3 — Sigstore       | **Yes** | `cosign sign --identity-token` against the image |
+| 4 — CI/CD pipeline | No — **builds + pushes itself** | Full BUILD → PUSH → SIGN pipeline |
+| 5 — Policy gate    | No — builds its own `busybox` unsigned image | Demonstrates Kyverno blocking unsigned workloads |
+| 6 — Audit trail    | **Yes** (ideally already signed by Demo 2 or 3) | Attests + replays signature/Rekor chain |
 
 ## Demo Overview
 
-| # | Name | Script | Duration | What it shows |
-|---|------|--------|----------|---------------|
-| 1 | The Painful Baseline | `demo1-before/run.sh` | ~5 min | Manual GPG signing — the old way |
-| 2 | Smallstep CA Signing | `demo2-smallstep/run.sh` | ~8 min | Short-lived certs, private PKI |
-| 3 | Sigstore Keyless | `demo3-sigstore/run.sh` | ~8 min | No keys, OIDC identity, Rekor log |
-| 4 | CI/CD Pipeline | `demo4-cicd/run.sh` | ~10 min | Automated build → sign → deploy |
-| 5 | Policy Gate | `demo5-verification/run.sh` | ~8 min | Kyverno blocks unsigned images |
-| 6 | Audit Trail | `demo6-audit/run.sh` | ~8 min | Attestations, CISO report |
+| # | Name | Script | Per-demo README | Duration | What it shows |
+|---|------|--------|-----------------|----------|---------------|
+| 1 | The Painful Baseline | `demo1-before/run.sh` | [demo1-before/README.md](demo1-before/README.md) | ~5 min | Manual GPG signing — the old way |
+| 2 | Smallstep CA Signing | `demo2-smallstep/run.sh` | [demo2-smallstep/README.md](demo2-smallstep/README.md) | ~8 min | Short-lived certs, private PKI |
+| 3 | Sigstore Keyless | `demo3-sigstore/run.sh` | [demo3-sigstore/README.md](demo3-sigstore/README.md) | ~8 min | No keys, OIDC identity, Rekor log |
+| 4 | CI/CD Pipeline | `demo4-cicd/run.sh` | [demo4-cicd/README.md](demo4-cicd/README.md) | ~10 min | Automated build → sign → deploy |
+| 5 | Policy Gate | `demo5-verification/run.sh` | [demo5-verification/README.md](demo5-verification/README.md) | ~8 min | Kyverno blocks unsigned images |
+| 6 | Audit Trail | `demo6-audit/run.sh` | [demo6-audit/README.md](demo6-audit/README.md) | ~8 min | Attestations, CISO report |
+
+Each per-demo README covers **what changes** in the cluster/registry/Rekor,
+plus **CLI and GUI verification steps for both minikube and AKS**.
 
 **Total runtime:** ~47 minutes for all 6 demos in sequence.
 **Recommended conference slot:** 45–60 minutes.
+
+### Pacing the demos on stage
+
+Every demo script pauses between steps and waits for **ENTER** before
+continuing — so you can narrate each step, answer audience questions, or
+switch back to slides without the script racing ahead.
+
+```bash
+bash demos/demo3-sigstore/run.sh           # interactive — pauses between steps
+DEMO_AUTO=1 bash demos/demo3-sigstore/run.sh   # skip prompts (rehearsals, CI)
+bash demos/demo3-sigstore/run.sh < /dev/null   # also non-interactive (no TTY)
+```
+
+Pauses are suppressed automatically when stdin isn't a terminal (pipes,
+redirects, CI), so `scripts/verify.sh`-style automation keeps working.
 
 ## Running Order
 
@@ -60,16 +110,20 @@ All scripts have an **EXIT trap** that cleans up created resources.
 
 ## Environment Variables
 
-Override defaults with environment variables:
+Most defaults are auto-detected by `scripts/_cluster-detect.sh` based on the current
+`kubectl` context. Override only when you need to point at something different.
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `REGISTRY` | `localhost:30500` | Registry endpoint |
-| `IMAGE` | `localhost:30500/demo/app:latest` | Demo app image |
-| `REKOR_URL` | `http://localhost:30300` | Rekor transparency log |
-| `FULCIO_URL` | `http://localhost:30200` | Fulcio CA |
-| `TUF_URL` | `http://localhost:30100` | TUF mirror |
-| `STEP_CA_URL` | `https://localhost:39000` | Smallstep CA |
+| Variable | minikube default | AKS default | Description |
+|----------|------------------|-------------|-------------|
+| `CLUSTER_KIND` | `minikube` | `aks` | Auto-detected from context + node providerID |
+| `REGISTRY` | `localhost:30500` | `<acr>.azurecr.io` | Host-side push target |
+| `CLUSTER_REGISTRY` | `registry.registry.svc.cluster.local:5000` | `<acr>.azurecr.io` | In-cluster pull target |
+| `IMAGE` | `localhost:30500/demo/app:latest` | `<acr>.azurecr.io/demo/app:latest` | Demo app image |
+| `REKOR_URL` | `http://localhost:30300` | (port-forwarded) | Rekor transparency log |
+| `FULCIO_URL` | `http://localhost:30200` | (port-forwarded) | Fulcio CA |
+| `TUF_URL` | `http://localhost:30100` | (port-forwarded) | TUF mirror |
+| `STEP_CA_URL` | `https://localhost:39000` | (port-forwarded) | Smallstep CA |
+| `AKS_OIDC_ISSUER_URL` | _(unset)_ | `https://<region>.oic.prod-aks.azure.com/<tenant>/<cluster>/` | Used by demos 3/4/5/6 for `--certificate-oidc-issuer` on AKS |
 
 ## Presenter Tips
 
@@ -79,6 +133,7 @@ Override defaults with environment variables:
 - **Have the port-forwards running** — `bash scripts/port-forward.sh`
 - **Keep each demo < 10 minutes** — audience attention peaks for shorter segments
 - **For Demo 5**, the Kyverno enforcement takes 5–10 seconds to propagate after patching — build in a pause
+- **On AKS**: ACR access tokens expire after ~3 hours. Re-run `az acr login -n <acr>` if `docker push` starts returning 401. Run `bash scripts/aks-down.sh` between sessions to avoid idle cluster cost.
 
 ## Troubleshooting
 

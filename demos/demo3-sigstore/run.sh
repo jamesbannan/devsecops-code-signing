@@ -21,19 +21,43 @@ RED='\033[0;31m'
 BOLD='\033[1m'
 NC='\033[0m'
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+# shellcheck source=../../scripts/_cluster-detect.sh
+source "$REPO_ROOT/scripts/_cluster-detect.sh"
+
 REGISTRY="${REGISTRY:-localhost:30500}"
 IMAGE="${IMAGE:-${REGISTRY}/demo/app:latest}"
 REKOR_URL="${REKOR_URL:-http://localhost:30300}"
 FULCIO_URL="${FULCIO_URL:-http://localhost:30200}"
 TUF_URL="${TUF_URL:-http://localhost:30100}"
-OIDC_ISSUER="https://kubernetes.default.svc"
+if [ "${CLUSTER_KIND:-}" = "aks" ] && [ -n "${AKS_OIDC_ISSUER_URL:-}" ]; then
+  OIDC_ISSUER="$AKS_OIDC_ISSUER_URL"
+else
+  OIDC_ISSUER="https://kubernetes.default.svc"
+fi
 
 TMPDIR=$(mktemp -d /tmp/demo3-sigstore-XXXXXX)
 
 cleanup() { rm -rf "$TMPDIR"; }
 trap cleanup EXIT
 
-header()  { printf "\n${CYAN}${BOLD}=== %s ===${NC}\n" "$1"; }
+# Pause between steps so the audience can absorb each phase. Set DEMO_AUTO=1
+# to skip (e.g. when invoked from scripts/verify.sh or CI); skipped automatically
+# when stdin is not a TTY.
+DEMO_AUTO="${DEMO_AUTO:-0}"
+_STEP_COUNT=0
+pause_for_next() {
+  _STEP_COUNT=$((_STEP_COUNT + 1))
+  [ "$_STEP_COUNT" -eq 1 ] && return 0
+  [ "$DEMO_AUTO" = "1" ] && return 0
+  [ -t 0 ] || return 0
+  printf "\n${YELLOW}  ↵  Press ENTER for the next step (Ctrl-C to stop)…${NC} "
+  IFS= read -r _ || true
+}
+
+header()  { pause_for_next; printf "\n${CYAN}${BOLD}=== %s ===${NC}\n" "$1"; }
 narrate() { printf "\n${BOLD}%s${NC}\n" "$1"; }
 cmd()     { printf "  ${YELLOW}\$ %s${NC}\n" "$*"; }
 ok()      { printf "  ${GREEN}[OK]${NC} %s\n" "$1"; }
@@ -112,7 +136,10 @@ echo ""
 cmd "cosign sign --fulcio-url $FULCIO_URL --rekor-url $REKOR_URL \\"
 cmd "  --identity-token <token> --allow-insecure-registry $IMAGE"
 
-# Get a fresh token and sign
+# Get a fresh token and sign.
+# cosign v3+ stores signatures exclusively as OCI 1.1 referrers (subject manifests
+# pointing at the image digest). There is no longer a separate '.sig' tag in the
+# registry — discover signatures via `cosign tree` or the /referrers API.
 TOKEN=$(kubectl create token signing-sa -n workload --audience=sigstore --duration=10m)
 SIGN_OUTPUT=$(cosign sign \
   --fulcio-url "$FULCIO_URL" \
@@ -129,6 +156,21 @@ if [ "$SIGN_RC" -eq 0 ]; then
   echo "$SIGN_OUTPUT" | grep -E "tlog entry|SCT" | sed 's/^/  /'
   echo ""
   ok "Image signed keylessly (tlog index: ${TLOG_INDEX:-?})"
+
+  # Show the user *where* the signature landed in the registry. cosign v3 always
+  # stores signatures as OCI 1.1 referrers — no separate '.sig' tag is created.
+  IMAGE_DIGEST=$(cosign triangulate --type=digest --allow-insecure-registry "$IMAGE" 2>/dev/null \
+    | awk -F'@' '{print $2}')
+  if [ -n "$IMAGE_DIGEST" ]; then
+    note "Signature attached as OCI 1.1 referrer of:"
+    note "  ${REGISTRY}/demo/app@${IMAGE_DIGEST}"
+    note "  (no separate '.sig' tag — cosign v3 uses referrers exclusively)"
+    note "Inspect with: cosign tree ${REGISTRY}/demo/app@${IMAGE_DIGEST}"
+    if [ "${CLUSTER_KIND:-}" = "aks" ] && [ -n "${ACR_NAME:-}" ]; then
+      note "Or in ACR:    az acr manifest list-referrers -r ${ACR_NAME} -n demo/app@${IMAGE_DIGEST}"
+      note "ACR Portal:   Repositories → demo/app → click the image digest → Referrers tab"
+    fi
+  fi
 else
   echo "$SIGN_OUTPUT" | tail -5 | sed 's/^/  /'
   fail "Keyless signing failed"

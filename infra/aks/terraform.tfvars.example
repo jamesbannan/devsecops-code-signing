@@ -1,0 +1,13 @@
+# Copy to terraform.tfvars and customise as needed.
+# terraform.tfvars is gitignored.
+
+# location           = "australiaeast"
+# name_prefix        = "dsoacs"
+# kubernetes_version = "1.30"
+# enable_telemetry   = false
+#
+# tags = {
+#   project = "devsecops-code-signing"
+#   env     = "dev"
+#   owner   = "your-name"
+# }

@@ -1,11 +1,15 @@
-{{- if and .Values.kyverno.enabled .Values.workload.enabled }}
+{{- if and .Values.kyverno.enabled .Values.workload.enabled .Values.workload.policy.installClusterPolicy }}
 ---
 # cluster-image-policy.yaml — Kyverno ClusterPolicy requiring cosign signatures
 # on images deployed into the workload namespace.
 #
-# Hook weight 5: Kyverno's admission webhook must be registered before this
-# ClusterPolicy is applied, otherwise the webhook rejects its own CRDs.
-# Weight 5 > default (0) ensures Kyverno pods are ready first.
+# Gated behind .Values.workload.policy.installClusterPolicy (default: false).
+# scripts/install.sh applies this in a second `helm upgrade --reuse-values
+# --set workload.policy.installClusterPolicy=true` step AFTER Kyverno's
+# admission webhook is verified Ready (deployment Available + endpoints
+# populated). This avoids the well-known race where the post-install hook
+# fires before kyverno-admission-controller pods register webhook endpoints,
+# producing "no endpoints available for service ...kyverno-svc".
 #
 # validationFailureAction defaults to Audit — violations are logged in
 # PolicyReports but images are still admitted. Switch to Enforce for Demo 5:
@@ -20,9 +24,6 @@ metadata:
     {{- include "devsecops-demo.labels" . | nindent 4 }}
     app.kubernetes.io/component: policy
   annotations:
-    helm.sh/hook: post-install,post-upgrade
-    helm.sh/hook-weight: "5"
-    helm.sh/hook-delete-policy: before-hook-creation
     policies.kyverno.io/title: Require Image Signature
     policies.kyverno.io/category: Supply Chain Security
     policies.kyverno.io/severity: high

@@ -30,7 +30,16 @@ ok()      { printf "  ${GREEN}[OK]${NC} %s\n" "$1"; }
 fail()    { printf "  ${RED}[ERROR]${NC} %s\n" "$1"; exit 1; }
 step()    { printf "\n${YELLOW}▶ %s${NC}\n" "$1"; }
 
+# Cluster auto-detection (sets CLUSTER_KIND, REGISTRY, CLUSTER_REGISTRY, etc.)
+# shellcheck source=./_cluster-detect.sh
+source "$SCRIPT_DIR/_cluster-detect.sh"
+
 header "DevSecOps Demo — Install"
+
+info "Cluster kind: $CLUSTER_KIND"
+if [ "$CLUSTER_KIND" = "aks" ]; then
+  info "ACR login server: ${ACR_LOGIN_SERVER:-<unknown>}"
+fi
 
 # =============================================================================
 # Step 1: Pre-flight checks
@@ -49,7 +58,11 @@ done
 # minikube / cluster check
 info "Checking cluster connectivity ..."
 if ! kubectl cluster-info &>/dev/null; then
-  fail "Cannot reach Kubernetes cluster. Run: bash scripts/start-minikube.sh"
+  if [ "$CLUSTER_KIND" = "aks" ]; then
+    fail "Cannot reach Kubernetes cluster. Run: bash scripts/aks-up.sh"
+  else
+    fail "Cannot reach Kubernetes cluster. Run: bash scripts/start-minikube.sh"
+  fi
 fi
 ok "Cluster reachable"
 
@@ -58,18 +71,36 @@ info "Checking OIDC issuer ..."
 ISSUER=$(kubectl get --raw /.well-known/openid-configuration 2>/dev/null | \
   python3 -c "import sys,json; print(json.load(sys.stdin).get('issuer',''))" 2>/dev/null || echo "")
 
-if [ "$ISSUER" != "https://kubernetes.default.svc" ]; then
-  printf "  ${RED}[ERROR]${NC} OIDC issuer is '%s'\n" "$ISSUER"
-  echo "         Expected: https://kubernetes.default.svc"
-  echo ""
-  echo "  Fix: restart minikube with the correct flags:"
-  echo "    bash scripts/start-minikube.sh"
-  echo ""
-  echo "  The --extra-config=apiserver.service-account-issuer flag is mandatory"
-  echo "  for Fulcio keyless signing. Without it, Kubernetes ServiceAccount JWTs"
-  echo "  carry an unpredictable issuer URL that Fulcio cannot validate."
-  exit 1
-fi
+case "$CLUSTER_KIND" in
+  minikube|other)
+    EXPECTED_ISSUER="https://kubernetes.default.svc"
+    if [ "$ISSUER" != "$EXPECTED_ISSUER" ]; then
+      printf "  ${RED}[ERROR]${NC} OIDC issuer is '%s'\n" "$ISSUER"
+      echo "         Expected: $EXPECTED_ISSUER"
+      echo ""
+      echo "  Fix: restart minikube with the correct flags:"
+      echo "    bash scripts/start-minikube.sh"
+      echo ""
+      echo "  The --extra-config=apiserver.service-account-issuer flag is mandatory"
+      echo "  for Fulcio keyless signing. Without it, Kubernetes ServiceAccount JWTs"
+      echo "  carry an unpredictable issuer URL that Fulcio cannot validate."
+      exit 1
+    fi
+    ;;
+  aks)
+    # AKS exposes a public OIDC issuer URL (https://oidc.prod-aks.azure.com/<guid>/).
+    # We accept whatever the cluster reports; values-aks.local.yaml must reference
+    # the same URL so Fulcio trusts ServiceAccount tokens issued by this cluster.
+    if [ -z "$ISSUER" ]; then
+      fail "AKS cluster did not return an OIDC issuer URL. Re-run scripts/aks-up.sh."
+    fi
+    if [ -n "${AKS_OIDC_ISSUER_URL:-}" ] && [ "$ISSUER" != "$AKS_OIDC_ISSUER_URL" ]; then
+      printf "  ${YELLOW}[WARN]${NC} Issuer mismatch:\n"
+      printf "         Cluster reports: %s\n" "$ISSUER"
+      printf "         Terraform output: %s\n" "$AKS_OIDC_ISSUER_URL"
+    fi
+    ;;
+esac
 ok "OIDC issuer: $ISSUER"
 
 # =============================================================================
@@ -91,6 +122,16 @@ HELM_ARGS=(
   --create-namespace
   --timeout "$TIMEOUT"
 )
+
+if [ -z "$VALUES_FILE" ] && [ "$CLUSTER_KIND" = "aks" ]; then
+  AUTO_VALUES="$CHART_DIR/values-aks.local.yaml"
+  if [ -f "$AUTO_VALUES" ]; then
+    VALUES_FILE="$AUTO_VALUES"
+    info "Auto-selected AKS values file: $VALUES_FILE"
+  else
+    fail "On AKS but $AUTO_VALUES not found. Run: bash scripts/aks-up.sh"
+  fi
+fi
 
 if [ -n "$VALUES_FILE" ]; then
   HELM_ARGS+=(-f "$VALUES_FILE")
@@ -170,6 +211,7 @@ DEPLOY_WAIT_LIST=(
   "tuf-system/deployment/${RELEASE_NAME}-tuf-tuf"
   "pki/statefulset/${RELEASE_NAME}-stepca"
   "registry/deployment/registry"
+  "policy/deployment/kyverno-admission-controller"
 )
 
 DEPLOY_TIMEOUT=600  # 10 minutes
@@ -200,6 +242,49 @@ if [ "$DEPLOY_FAILED" -ne 0 ]; then
 fi
 
 ok "All core infrastructure is Ready"
+
+# ---------------------------------------------------------------------------
+# Apply Kyverno ClusterPolicy (require-image-signature)
+# ---------------------------------------------------------------------------
+# The ClusterPolicy is intentionally NOT installed by the initial helm release.
+# Kyverno's admission webhook (devsecops-demo-kyverno-svc) needs ready endpoints
+# before it can admit ClusterPolicy CRDs; on slower clusters (notably AKS cold
+# starts) the post-install hook fires before those endpoints exist, producing
+# "no endpoints available for service ...kyverno-svc". We deferred the policy
+# behind .Values.workload.policy.installClusterPolicy; now that the admission
+# controller deployment is Available, wait for the Service to have at least one
+# endpoint and then enable the policy via a second helm upgrade.
+header "Applying Kyverno ClusterPolicy"
+
+KYVERNO_SVC="${RELEASE_NAME}-kyverno-svc"
+info "Waiting for endpoints on policy/${KYVERNO_SVC} ..."
+KYVERNO_ENDPOINTS_READY=0
+for _ in $(seq 1 60); do
+  ADDRS=$(kubectl get endpoints "$KYVERNO_SVC" -n policy \
+    -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null || true)
+  if [ -n "$ADDRS" ]; then
+    KYVERNO_ENDPOINTS_READY=1
+    break
+  fi
+  sleep 5
+done
+if [ "$KYVERNO_ENDPOINTS_READY" -ne 1 ]; then
+  fail "Kyverno admission webhook endpoints never populated (policy/${KYVERNO_SVC})."
+fi
+ok "Kyverno admission webhook endpoints ready: $ADDRS"
+
+step "helm upgrade --reuse-values --set workload.policy.installClusterPolicy=true"
+HELM_POLICY_ARGS=(
+  upgrade "$RELEASE_NAME" "$CHART_DIR"
+  --namespace pki
+  --reuse-values
+  --set workload.policy.installClusterPolicy=true
+  --timeout "$TIMEOUT"
+)
+if ! helm "${HELM_POLICY_ARGS[@]}"; then
+  fail "Failed to apply Kyverno ClusterPolicy via helm upgrade."
+fi
+ok "ClusterPolicy require-image-signature applied"
 
 # =============================================================================
 # Step 4: Port-forwards
@@ -239,7 +324,12 @@ header "Endpoint summary"
 printf "\n"
 printf "  %-20s %-40s %s\n" "Service" "Host URL" "In-cluster DNS"
 printf "  %-20s %-40s %s\n" "-------" "--------" "--------------"
-printf "  %-20s %-40s %s\n" "Docker Registry" "localhost:30500" "registry.registry.svc:5000"
+if [ "$CLUSTER_KIND" = "aks" ]; then
+  printf "  %-20s %-40s %s\n" "Container Registry" "${ACR_LOGIN_SERVER:-<unknown>} (ACR)" "${ACR_LOGIN_SERVER:-<unknown>}"
+  printf "  %-20s %-40s %s\n" "Registry mirror"   "localhost:30500" "registry.registry.svc:5000"
+else
+  printf "  %-20s %-40s %s\n" "Docker Registry" "localhost:30500" "registry.registry.svc:5000"
+fi
 printf "  %-20s %-40s %s\n" "Rekor" "http://localhost:30300" "rekor-server.rekor-system.svc:80"
 printf "  %-20s %-40s %s\n" "Fulcio" "http://localhost:30200" "fulcio-server.fulcio-system.svc:80"
 printf "  %-20s %-40s %s\n" "TUF mirror" "http://localhost:30100" "tuf-server.tuf-system.svc:80"
@@ -248,6 +338,14 @@ printf "\n"
 
 ok "Installation complete!"
 echo ""
-printf "  Run verification: ${CYAN}bash scripts/verify.sh${NC}\n"
-printf "  Start demos:      ${CYAN}bash demos/demo1-before/run.sh${NC}\n"
+printf "  ${YELLOW}Next steps:${NC}\n"
+printf "    1. Verify the stack:        ${CYAN}bash scripts/verify.sh${NC}\n"
+printf "    2. Build & push demo image: ${CYAN}bash demos/demo-app/build-and-push.sh${NC}\n"
+printf "       ${YELLOW}(required for demos 2, 3, 6; demo 4 builds its own; demos 1 & 5 don't need it)${NC}\n"
+printf "    3. Run the demos:           ${CYAN}bash demos/demo1-before/run.sh${NC}\n"
+printf "                                ${CYAN}bash demos/demo2-smallstep/run.sh${NC}\n"
+printf "                                ${CYAN}bash demos/demo3-sigstore/run.sh${NC}\n"
+printf "                                ${CYAN}bash demos/demo4-cicd/run.sh${NC}\n"
+printf "                                ${CYAN}bash demos/demo5-verification/run.sh${NC}\n"
+printf "                                ${CYAN}bash demos/demo6-audit/run.sh${NC}\n"
 echo ""

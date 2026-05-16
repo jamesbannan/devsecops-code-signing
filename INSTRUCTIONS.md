@@ -1,5 +1,22 @@
 # TODO: Zero-Friction DevSecOps Demo — Helm Repository
 
+> **Note (post-build):** This file is the **original implementation specification** used
+> to generate the repository. It is retained as a design record. For the current
+> operational state of the project, use these instead:
+>
+> - **README.md** — quickstart for both minikube and Azure Kubernetes Service
+> - **demos/README.md** — running the six demo scripts (cluster auto-detected)
+> - **docs/architecture.md** — current architecture, cluster-topology differences
+> - **docs/troubleshooting.md** — failure modes for minikube **and** AKS
+> - **infra/aks/README.md** — Terraform stack for the dev/test AKS environment
+>
+> Since this spec was written, AKS support has graduated from "values override" to a
+> first-class deployment target: the repo now ships a Terraform stack (`infra/aks/`),
+> bootstrap scripts (`scripts/aks-up.sh` / `aks-down.sh`), and a cluster-detection
+> helper (`scripts/_cluster-detect.sh`) that lets `install.sh` and every demo script
+> work identically on either cluster. Fulcio's `OIDCIssuers` config now lists both
+> `https://kubernetes.default.svc` and the AKS-managed issuer URL.
+
 ## Context
 
 This repository supports the conference talk **"Zero-Friction DevSecOps: Automated
@@ -78,10 +95,15 @@ devsecops-demo/
 │       └── policy/                  ← Kyverno ClusterPolicy templates
 │
 ├── scripts/
-│   ├── start-minikube.sh            ← cluster bootstrap
+│   ├── start-minikube.sh            ← minikube cluster bootstrap
+│   ├── aks-up.sh                    ← AKS bootstrap (terraform apply + kubeconfig)
+│   ├── aks-down.sh                  ← AKS full teardown (helm uninstall + destroy)
+│   ├── _cluster-detect.sh           ← exports CLUSTER_KIND / REGISTRY / etc.
 │   ├── install.sh                   ← helm install wrapper with pre-flight checks
-│   ├── uninstall.sh                 ← clean teardown
+│   ├── uninstall.sh                 ← interactive teardown (prompts before deleting)
+│   ├── cleanup.sh                   ← non-interactive forceful reset (cluster stays up)
 │   ├── port-forward.sh              ← starts all host-side port-forwards
+│   ├── resume.sh                    ← restore port-forwards after laptop sleep
 │   └── verify.sh                    ← end-to-end verification (all demos)
 │
 ├── demos/
@@ -443,6 +465,53 @@ Checks to include:
 - Runs `helm uninstall devsecops-demo`
 - Optionally deletes all namespaces (prompt the user)
 - Optionally runs `minikube delete` (prompt the user)
+
+### `scripts/cleanup.sh`
+
+Forceful, non-interactive reset of the demo (cluster stays up). Use this when a
+`helm uninstall` got stuck (orphan Kyverno webhooks, terminating namespaces,
+PVC finalizers blocking namespace termination) and you want to re-run
+`install.sh` without paying the AKS cluster creation cost again.
+
+Order of operations:
+1. Stop port-forwards from `/tmp/devsecops-pf.pids`.
+2. Delete orphan Kyverno `Validating`/`MutatingWebhookConfigurations` **first** —
+   otherwise the `failurePolicy: Fail` webhooks block all cluster-wide deletes.
+3. `helm uninstall --no-hooks` (skips post-delete hook calls into the now-missing webhook).
+4. Force-delete `pods,jobs,deployments,replicasets,statefulsets,daemonsets,cronjobs`
+   in each demo namespace (`--grace-period=0 --force`).
+5. Patch out PVC finalizers.
+6. Optionally purge demo CRDs (`PURGE_CRDS=true`).
+7. Wait up to `NS_WAIT_SECONDS` (default 60) for namespaces to terminate;
+   clear remaining finalizers via the `/finalize` subresource as a last resort.
+
+Environment variables: `FORCE=true` (skip prompt), `PURGE_CRDS=true`,
+`NS_WAIT_SECONDS`, `RELEASE_NAME`, `HELM_NAMESPACE`.
+
+### `scripts/resume.sh`
+
+Restore the demo environment after the laptop has woken from sleep — without
+re-running `install.sh`. Run this between sessions when you notice that
+`curl localhost:30300` (or any other forwarded port) hangs or returns
+connection-refused even though the cluster itself is still healthy.
+
+Order of operations:
+1. Detect cluster (minikube or AKS) via `_cluster-detect.sh`.
+2. Verify the Kubernetes API is reachable. If not:
+   - AKS: re-run `az aks get-credentials` (reads `infra/aks` terraform outputs);
+     optionally `az login` first if `FORCE_AKS_REAUTH=1`.
+   - minikube: `minikube start` if the VM has stopped.
+3. Kill all surviving `kubectl port-forward` processes — both the PIDs recorded
+   in `/tmp/devsecops-pf.pids` and any orphans bound to our well-known ports
+   (30100/30200/30300/30500/39000).
+4. Re-run `scripts/port-forward.sh`.
+5. Probe each endpoint (Registry, Rekor, Fulcio, TUF, step-ca) with curl,
+   retrying for up to ~5 seconds each.
+6. If anything still fails, restart port-forwards once more and re-probe the
+   broken ones; exit non-zero if they remain unreachable.
+
+Environment variables: `FORCE_AKS_REAUTH=1` (run `az login` before
+get-credentials).
 
 ---
 

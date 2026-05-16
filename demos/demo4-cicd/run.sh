@@ -26,11 +26,14 @@ RED='\033[0;31m'
 BOLD='\033[1m'
 NC='\033[0m'
 
+# shellcheck source=../../scripts/_cluster-detect.sh
+source "$REPO_ROOT/scripts/_cluster-detect.sh"
+
 REGISTRY="${REGISTRY:-localhost:30500}"
 IMAGE="${IMAGE:-${REGISTRY}/demo/app:latest}"
 # In-cluster image reference for the Deployment — Kyverno runs inside the cluster
-# and cannot reach localhost:30500, so we use the in-cluster DNS name.
-CLUSTER_IMAGE="registry.registry.svc:5000/demo/app:latest"
+# and cannot reach localhost:30500, so we use the in-cluster DNS name (or ACR on AKS).
+CLUSTER_IMAGE="${CLUSTER_REGISTRY}/demo/app:latest"
 REKOR_URL="${REKOR_URL:-http://localhost:30300}"
 FULCIO_URL="${FULCIO_URL:-http://localhost:30200}"
 STEP_CA_URL="${STEP_CA_URL:-https://localhost:39000}"
@@ -40,14 +43,33 @@ BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 TMPDIR=$(mktemp -d /tmp/demo4-cicd-XXXXXX)
 
+# Pre-clean any stale deployment from a previous run so kubectl apply is fresh.
+# NOTE: we intentionally do NOT delete the deployment on exit — leaving it
+# running lets the audience point at `kubectl get deployment -n workload`
+# after the demo to confirm the signed image was admitted.
+kubectl delete deployment demo-app-signed -n workload --ignore-not-found=true 2>/dev/null || true
+
 cleanup() {
   rm -rf "$TMPDIR"
-  kubectl delete deployment demo-app-signed -n workload --ignore-not-found=true 2>/dev/null || true
 }
 trap cleanup EXIT
 
+# Pause between steps so the audience can absorb each phase. Set DEMO_AUTO=1
+# to skip (e.g. when invoked from scripts/verify.sh or CI); skipped automatically
+# when stdin is not a TTY.
+DEMO_AUTO="${DEMO_AUTO:-0}"
+_STEP_COUNT=0
+pause_for_next() {
+  _STEP_COUNT=$((_STEP_COUNT + 1))
+  [ "$_STEP_COUNT" -eq 1 ] && return 0
+  [ "$DEMO_AUTO" = "1" ] && return 0
+  [ -t 0 ] || return 0
+  printf "\n${YELLOW}  ↵  Press ENTER for the next step (Ctrl-C to stop)…${NC} "
+  IFS= read -r _ || true
+}
+
 # CI-style step output
-step_start() { printf "\n${BOLD}${CYAN}▶ [%s]${NC} %s\n" "$1" "$2"; }
+step_start() { pause_for_next; printf "\n${BOLD}${CYAN}▶ [%s]${NC} %s\n" "$1" "$2"; }
 step_end()   { printf "  ${GREEN}✓ %s${NC}\n" "$1"; }
 cmd()        { printf "  ${YELLOW}\$ %s${NC}\n" "$*"; }
 narrate()    { printf "\n${BOLD}%s${NC}\n" "$1"; }
@@ -72,9 +94,18 @@ sleep 2
 step_start "BUILD" "Building container image"
 echo ""
 
-# Detect build tool (same logic as build-and-push.sh)
+# Detect build tool. On AKS we must push to ACR — never use minikube tooling.
 BUILD_TOOL=""
-if command -v minikube &>/dev/null && minikube status --format='{{.Host}}' 2>/dev/null | grep -q Running; then
+if [ "${CLUSTER_KIND:-}" = "aks" ]; then
+  if command -v docker &>/dev/null; then
+    BUILD_TOOL="docker"
+  elif command -v podman &>/dev/null; then
+    BUILD_TOOL="podman"
+  else
+    fail "AKS requires docker or podman to push to ACR"
+    exit 1
+  fi
+elif command -v minikube &>/dev/null && minikube status --format='{{.Host}}' 2>/dev/null | grep -q Running; then
   BUILD_TOOL="minikube"
 elif command -v podman &>/dev/null; then
   BUILD_TOOL="podman"
@@ -86,20 +117,33 @@ else
 fi
 note "Build tool: $BUILD_TOOL"
 
+# AKS nodes are amd64 by default; macOS arm64 dev machines produce arm64
+# binaries unless told otherwise, which causes the pod to CrashLoopBackOff
+# after admission. Force linux/amd64 on AKS. Override via TARGET_PLATFORM.
+if [ "${CLUSTER_KIND:-}" = "aks" ]; then
+  TARGET_PLATFORM="${TARGET_PLATFORM:-linux/amd64}"
+  note "Target platform: $TARGET_PLATFORM"
+else
+  TARGET_PLATFORM="${TARGET_PLATFORM:-}"
+fi
+
 case "$BUILD_TOOL" in
   minikube)
     cmd "minikube image build -t $IMAGE demos/demo-app/"
     minikube image build -t "$IMAGE" "$REPO_ROOT/demos/demo-app" 2>&1 | tail -3
     ;;
   podman)
-    cmd "podman build -t $IMAGE demos/demo-app/"
+    cmd "podman build ${TARGET_PLATFORM:+--platform $TARGET_PLATFORM }-t $IMAGE demos/demo-app/"
     podman build --tls-verify=false \
+      ${TARGET_PLATFORM:+--platform "$TARGET_PLATFORM"} \
       --build-arg "GIT_SHA=$GIT_SHA" --build-arg "BUILD_TIME=$BUILD_TIME" \
       --tag "$IMAGE" "$REPO_ROOT/demos/demo-app" 2>&1 | tail -3
     ;;
   docker)
-    cmd "docker build -t $IMAGE demos/demo-app/"
-    docker build --build-arg "GIT_SHA=$GIT_SHA" --build-arg "BUILD_TIME=$BUILD_TIME" \
+    cmd "docker build ${TARGET_PLATFORM:+--platform $TARGET_PLATFORM }-t $IMAGE demos/demo-app/"
+    docker build \
+      ${TARGET_PLATFORM:+--platform "$TARGET_PLATFORM"} \
+      --build-arg "GIT_SHA=$GIT_SHA" --build-arg "BUILD_TIME=$BUILD_TIME" \
       --tag "$IMAGE" "$REPO_ROOT/demos/demo-app" 2>&1 | tail -3
     ;;
 esac
@@ -124,10 +168,18 @@ case "$BUILD_TOOL" in
     minikube ssh -- "sudo ctr -n k8s.io images tag '$IMAGE' '$CLUSTER_IMAGE'" 2>/dev/null || true
     ;;
   podman)
-    cmd "podman push --tls-verify=false $IMAGE"
-    podman push --tls-verify=false "$IMAGE" 2>&1 | tail -3
+    if [ "${CLUSTER_KIND:-}" = "aks" ] && [ -n "${ACR_NAME:-}" ]; then
+      cmd "az acr login -n $ACR_NAME"
+      az acr login -n "$ACR_NAME" >/dev/null
+    fi
+    cmd "podman push $IMAGE"
+    podman push "$IMAGE" 2>&1 | tail -3
     ;;
   docker)
+    if [ "${CLUSTER_KIND:-}" = "aks" ] && [ -n "${ACR_NAME:-}" ]; then
+      cmd "az acr login -n $ACR_NAME"
+      az acr login -n "$ACR_NAME" >/dev/null
+    fi
     cmd "docker push $IMAGE"
     docker push "$IMAGE" 2>&1 | tail -3
     ;;
@@ -175,6 +227,7 @@ COSIGN_PASSWORD="" cosign import-key-pair \
   --output-key-prefix "$TMPDIR/cosign-imported" 2>/dev/null
 
 cmd "cosign sign --key cosign-imported.key --certificate cert.pem --certificate-chain chain.pem $IMAGE"
+# cosign v3 stores signatures as OCI 1.1 referrers — discover with `cosign tree`.
 SMALLSTEP_SIGN=$(COSIGN_PASSWORD="" cosign sign \
   --key "$TMPDIR/cosign-imported.key" \
   --certificate "$TMPDIR/cert.pem" \
@@ -235,7 +288,11 @@ step_start "VERIFY" "Verifying image signatures"
 echo ""
 
 SA_IDENTITY="https://kubernetes.io/namespaces/workload/serviceaccounts/signing-sa"
-OIDC_ISSUER="https://kubernetes.default.svc"
+if [ "${CLUSTER_KIND:-}" = "aks" ] && [ -n "${AKS_OIDC_ISSUER_URL:-}" ]; then
+  OIDC_ISSUER="$AKS_OIDC_ISSUER_URL"
+else
+  OIDC_ISSUER="https://kubernetes.default.svc"
+fi
 
 cmd "cosign verify --certificate-identity '$SA_IDENTITY' \\"
 cmd "  --certificate-oidc-issuer '$OIDC_ISSUER' $IMAGE"
@@ -289,7 +346,7 @@ spec:
       containers:
         - name: app
           image: $CLUSTER_IMAGE
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           env:
             - name: IMAGE_SIGNED
               value: "true"

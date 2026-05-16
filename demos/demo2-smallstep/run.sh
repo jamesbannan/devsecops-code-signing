@@ -23,6 +23,12 @@ RED='\033[0;31m'
 BOLD='\033[1m'
 NC='\033[0m'
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+# shellcheck source=../../scripts/_cluster-detect.sh
+source "$REPO_ROOT/scripts/_cluster-detect.sh"
+
 REGISTRY="${REGISTRY:-localhost:30500}"
 IMAGE="${IMAGE:-${REGISTRY}/demo/app:latest}"
 STEP_CA_URL="${STEP_CA_URL:-https://localhost:39000}"
@@ -36,7 +42,21 @@ cleanup() {
 }
 trap cleanup EXIT
 
-header()  { printf "\n${CYAN}${BOLD}=== %s ===${NC}\n" "$1"; }
+# Pause between steps so the audience can absorb each phase. Set DEMO_AUTO=1
+# to skip (e.g. when invoked from scripts/verify.sh or CI); skipped automatically
+# when stdin is not a TTY.
+DEMO_AUTO="${DEMO_AUTO:-0}"
+_STEP_COUNT=0
+pause_for_next() {
+  _STEP_COUNT=$((_STEP_COUNT + 1))
+  [ "$_STEP_COUNT" -eq 1 ] && return 0
+  [ "$DEMO_AUTO" = "1" ] && return 0
+  [ -t 0 ] || return 0
+  printf "\n${YELLOW}  ↵  Press ENTER for the next step (Ctrl-C to stop)…${NC} "
+  IFS= read -r _ || true
+}
+
+header()  { pause_for_next; printf "\n${CYAN}${BOLD}=== %s ===${NC}\n" "$1"; }
 narrate() { printf "\n${BOLD}%s${NC}\n" "$1"; }
 cmd()     { printf "  ${YELLOW}\$ %s${NC}\n" "$*"; }
 ok()      { printf "  ${GREEN}[OK]${NC} %s\n" "$1"; }
@@ -160,6 +180,9 @@ cmd "cosign sign --key cosign-imported.key --certificate cert.pem \\"
 cmd "  --certificate-chain chain.pem --rekor-url $REKOR_URL \\"
 cmd "  --allow-insecure-registry $IMAGE"
 
+# cosign v3 stores the signature as an OCI 1.1 referrer (subject manifest
+# linked to the image digest) — there is no separate '.sig' tag. Discover via
+# `cosign tree` or the registry's /referrers API.
 COSIGN_PASSWORD="" cosign sign \
   --key "$TMPDIR/cosign-imported.key" \
   --certificate "$TMPDIR/cert.pem" \

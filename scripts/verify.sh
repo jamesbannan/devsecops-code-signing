@@ -24,6 +24,12 @@ TUF_URL="${TUF_URL:-http://localhost:30100}"
 STEP_CA_URL="${STEP_CA_URL:-https://localhost:39000}"
 IMAGE="${IMAGE:-${REGISTRY}/demo/app:latest}"
 
+# Source cluster detection so checks can branch on minikube vs AKS.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/_cluster-detect.sh" >/dev/null 2>&1 || true
+CLUSTER_KIND="${CLUSTER_KIND:-unknown}"
+
 header() { printf "\n${CYAN}=== %s ===${NC}\n" "$1"; }
 chk()    { printf "  Check %2d: %-55s" "$1" "$2"; }
 pass()   { printf "${GREEN}[PASS]${NC}\n"; PASS_COUNT=$((PASS_COUNT + 1)); }
@@ -221,14 +227,24 @@ else
 fi
 
 # =============================================================================
-# Check 13: OIDC issuer matches https://kubernetes.default.svc
+# Check 13: OIDC issuer is appropriate for the cluster kind
 # =============================================================================
 header "Cluster configuration checks"
-chk 13 "OIDC issuer is https://kubernetes.default.svc"
-ISSUER=$(kubectl get --raw /.well-known/openid-configuration 2>/dev/null | \
-  python3 -c "import sys,json; print(json.load(sys.stdin).get('issuer',''))" 2>/dev/null || echo "")
-[ "$ISSUER" = "https://kubernetes.default.svc" ] && pass || \
-  fail "OIDC issuer is '$ISSUER' — restart minikube with scripts/start-minikube.sh"
+if [ "$CLUSTER_KIND" = "aks" ]; then
+  chk 13 "OIDC issuer is an AKS-managed issuer URL"
+  ISSUER=$(kubectl get --raw /.well-known/openid-configuration 2>/dev/null | \
+    python3 -c "import sys,json; print(json.load(sys.stdin).get('issuer',''))" 2>/dev/null || echo "")
+  case "$ISSUER" in
+    https://*.oic.prod-aks.azure.com/*) pass ;;
+    *) fail "OIDC issuer is '$ISSUER' — expected an AKS-managed issuer (*.oic.prod-aks.azure.com)" ;;
+  esac
+else
+  chk 13 "OIDC issuer is https://kubernetes.default.svc"
+  ISSUER=$(kubectl get --raw /.well-known/openid-configuration 2>/dev/null | \
+    python3 -c "import sys,json; print(json.load(sys.stdin).get('issuer',''))" 2>/dev/null || echo "")
+  [ "$ISSUER" = "https://kubernetes.default.svc" ] && pass || \
+    fail "OIDC issuer is '$ISSUER' — restart minikube with scripts/start-minikube.sh"
+fi
 
 # =============================================================================
 # Check 14: Kyverno is running and has processed its ClusterPolicy
@@ -277,10 +293,11 @@ fi
 # =============================================================================
 chk 18 "cosign attest + verify-attestation round-trip"
 # This check requires the image to be signed first
+ISSUER_FOR_VERIFY="${ISSUER:-https://kubernetes.default.svc}"
 if cosign verify \
   --rekor-url "$REKOR_URL" \
   --certificate-identity-regexp ".*" \
-  --certificate-oidc-issuer "https://kubernetes.default.svc" \
+  --certificate-oidc-issuer "$ISSUER_FOR_VERIFY" \
   --allow-insecure-registry \
   "$IMAGE" &>/dev/null; then
   # Try attesting

@@ -1,4 +1,4 @@
-{{- if and .Values.kyverno.enabled .Values.workload.enabled }}
+{{- if and .Values.kyverno.enabled .Values.workload.enabled .Values.workload.policy.installClusterPolicy }}
 ---
 # audit-policy.yaml — Kyverno ClusterPolicy that generates audit events for
 # every signed image admission in the workload namespace.
@@ -9,7 +9,12 @@
 # Unlike cluster-image-policy.yaml, this policy is always in Audit mode —
 # it does not block admissions. It purely generates reports.
 #
-# Hook weight 6: must apply after the main signature policy (weight 5).
+# Gated behind .Values.workload.policy.installClusterPolicy (default: false)
+# alongside cluster-image-policy.yaml. scripts/install.sh enables both via a
+# follow-up `helm upgrade --reuse-values --set
+# workload.policy.installClusterPolicy=true` after Kyverno's admission webhook
+# is verified Ready, avoiding the "no endpoints available for service
+# ...kyverno-svc" race on slower clusters (notably AKS cold starts).
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
@@ -18,9 +23,6 @@ metadata:
     {{- include "devsecops-demo.labels" . | nindent 4 }}
     app.kubernetes.io/component: policy-audit
   annotations:
-    helm.sh/hook: post-install,post-upgrade
-    helm.sh/hook-weight: "6"
-    helm.sh/hook-delete-policy: before-hook-creation
     policies.kyverno.io/title: Audit Signed Image Admissions
     policies.kyverno.io/category: Audit Trail
     policies.kyverno.io/severity: low

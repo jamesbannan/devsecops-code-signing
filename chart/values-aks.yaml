@@ -32,18 +32,29 @@ registry:
     storageClassName: "managed-csi"
     size: 5Gi
 
-# Sigstore OIDC issuer for AKS — update to your cluster's OIDC issuer URL
+# Sigstore OIDC issuer for AKS — update to your cluster's OIDC issuer URL.
+# The Sigstore Scaffolding Fulcio sub-chart consumes the full config blob via
+# `.config.contents`. We override it here to add the AKS-managed OIDC issuer
+# alongside the in-cluster issuer that backs the chart's built-in signing jobs.
 scaffold:
   fulcio:
-    server:
-      config:
-        oidcIssuers:
+    config:
+      contents:
+        OIDCIssuers:
           # Replace <OIDC_ISSUER_URL> with the output of:
           #   az aks show -n <cluster> -g <rg> --query "oidcIssuerProfile.issuerUrl"
           "<OIDC_ISSUER_URL>":
-            issuerURL: "<OIDC_ISSUER_URL>"
-            clientID: "sigstore"
-            type: "kubernetes"
+            IssuerURL: "<OIDC_ISSUER_URL>"
+            ClientID: "sigstore"
+            Type: "kubernetes"
+          "https://kubernetes.default.svc":
+            IssuerURL: "https://kubernetes.default.svc"
+            ClientID: "sigstore"
+            Type: "kubernetes"
+        MetaIssuers:
+          "https://kubernetes.*.svc":
+            ClientID: "sigstore"
+            Type: "kubernetes"
 
 # Demo app image reference — use ACR path
 workload:

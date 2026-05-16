@@ -3,12 +3,15 @@
 ## Overview
 
 The DevSecOps demo environment deploys a complete code-signing stack on a single
-Kubernetes cluster via `helm install`. All components run in-cluster; the only
-host-side requirement is a web browser or CLI tools to interact with the services.
+Kubernetes cluster via `helm install`. The same chart targets either a **local minikube**
+cluster (NodePort access, in-cluster Docker Registry) or **Azure Kubernetes Service**
+(ClusterIP + port-forward access, Azure Container Registry as the image store). All
+in-cluster components — step-ca, Fulcio, Rekor, TUF, Trillian, Kyverno — are identical
+across both targets; only the registry and OIDC issuer differ.
 
 ```
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║                         Kubernetes Cluster (minikube)                        ║
+║                  Kubernetes Cluster (minikube or AKS)                        ║
 ║                                                                              ║
 ║  ┌──────────────────┐   ┌────────────────────────────────────────────────┐  ║
 ║  │   pki namespace  │   │          Sigstore (scaffold chart)              │  ║
@@ -141,8 +144,8 @@ The `signed` field reflects the `IMAGE_SIGNED=true` environment variable, so sig
            ├─ cosign sign --key key.pem --certificate cert.pem --certificate-chain root_ca.crt
            │   └─ Signs image digest with ephemeral key
            │   └─ Embeds cert + chain in the signature
-           └─ cosign pushes signature to registry as OCI artifact
-              └─ registry/demo/app:sha256-<digest>.sig
+           └─ cosign pushes signature to registry as an OCI 1.1 referrer
+              └─ signature manifest with subject: registry/demo/app@sha256:<digest>
 ```
 
 **Verification:** `cosign verify --certificate-chain root_ca.crt` validates the cert was issued by the step-ca root CA and the signature matches the image digest.
@@ -165,7 +168,10 @@ The `signed` field reflects the `IMAGE_SIGNED=true` environment variable, so sig
            │   ├─ cosign generates ephemeral key pair (in memory)
            │   │
            │   ├─ POST /api/v1/signingCert → Fulcio (fulcio-server.fulcio-system.svc)
-           │   │   ├─ Fulcio verifies SA JWT against https://kubernetes.default.svc JWKS
+           │   │   ├─ Fulcio verifies SA JWT against the cluster's OIDC issuer JWKS
+           │   │   │     • minikube: https://kubernetes.default.svc
+           │   │   │     • AKS:      https://<region>.oic.prod-aks.azure.com/<tenant>/<cluster>/
+           │   │   │   (Fulcio's OIDCIssuers config lists both — same chart works on either target)
            │   │   ├─ Fulcio issues cert: Subject=SA identity, notAfter=+10m
            │   │   └─ Returns signed certificate
            │   │
@@ -175,8 +181,8 @@ The `signed` field reflects the `IMAGE_SIGNED=true` environment variable, so sig
            │   │   └─ Rekor appends {digest, cert, sig} to the Merkle tree
            │   │   └─ Returns: logIndex, UUID, signedEntryTimestamp
            │   │
-           │   └─ cosign pushes signature + Rekor bundle to registry
-           │      └─ registry/demo/app:sha256-<digest>.sig
+           │   └─ cosign pushes signature + Rekor bundle as an OCI 1.1 referrer
+           │      └─ signature manifest with subject: registry/demo/app@sha256:<digest>
            │
            └─ cosign discards ephemeral private key (never persisted)
 ```
@@ -202,10 +208,29 @@ The two paths are **complementary, not competing**. Many enterprises run private
 
 ## Port Reference
 
-| Service | Namespace | In-cluster DNS | Host port (local) |
-|---------|-----------|----------------|-------------------|
-| Docker Registry | registry | `registry.registry.svc:5000` | `localhost:30500` |
-| Rekor | rekor-system | `rekor-server.rekor-system.svc:3000` | `localhost:30300` |
-| Fulcio | fulcio-system | `fulcio-server.fulcio-system.svc:80` | `localhost:30200` |
-| TUF mirror | tuf-system | `tuf.tuf-system.svc:80` | `localhost:30100` |
-| step-ca | pki | `step-ca.pki.svc:9000` | `localhost:39000` |
+| Service | Namespace | In-cluster DNS | Host port (minikube NodePort) | AKS access |
+|---------|-----------|----------------|-------------------------------|------------|
+| Docker Registry | registry | `registry.registry.svc:5000` | `localhost:30500` | Not deployed — ACR replaces it on AKS |
+| Rekor | rekor-system | `rekor-server.rekor-system.svc:3000` | `localhost:30300` | `kubectl port-forward` (via `scripts/port-forward.sh`) |
+| Fulcio | fulcio-system | `fulcio-server.fulcio-system.svc:80` | `localhost:30200` | `kubectl port-forward` |
+| TUF mirror | tuf-system | `tuf.tuf-system.svc:80` | `localhost:30100` | `kubectl port-forward` |
+| step-ca | pki | `step-ca.pki.svc:9000` | `localhost:39000` | `kubectl port-forward` |
+| Azure Container Registry | _(external)_ | n/a | n/a | `<acr>.azurecr.io` (managed by `aks-up.sh`, AcrPull on AKS UAMI) |
+
+---
+
+## Cluster Topology Differences
+
+| Concern | minikube | AKS |
+|---------|----------|-----|
+| Image registry | In-cluster Docker Registry v2 (NodePort 30500) | Azure Container Registry (Premium SKU, attached via AcrPull role on the kubelet UAMI) |
+| Host registry push | `minikube image build` + `ctr push` (Docker Desktop's VM cannot reach NodePort) | `az acr login` + `docker push` / `podman push` |
+| OIDC issuer | `https://kubernetes.default.svc` (set via `--extra-config=apiserver.service-account-issuer` in `start-minikube.sh`) | AKS-managed: `https://<region>.oic.prod-aks.azure.com/<tenant>/<cluster>/` (read from `terraform output oidc_issuer_url`) |
+| Service exposure | NodePort on `$(minikube ip)` | ClusterIP only; host access via `kubectl port-forward` |
+| Storage class | `standard` (hostPath) | `managed-csi` (Azure Disk CSI) |
+| Provisioning | `scripts/start-minikube.sh` | `scripts/aks-up.sh` → Terraform (`infra/aks/`) creates RG + ACR + UAMI + AKS, then renders `chart/values-aks.local.yaml` |
+
+The Helm chart picks the right values file via `_cluster-detect.sh`: when `CLUSTER_KIND=aks`,
+`install.sh` automatically appends `-f chart/values-aks.local.yaml`. Demo scripts use
+`$REGISTRY` / `$CLUSTER_REGISTRY` (host vs in-cluster pull) and `$AKS_OIDC_ISSUER_URL` for
+the keyless verification flags.

@@ -15,16 +15,18 @@ kubectl get pods -A      # Check for CrashLoopBackOff, Pending, or OOMKilled pod
 ```
 cosign sign: error getting Fulcio SCTs: ...
 error fetching OIDC token: invalid issuer claim
+# Or, server-side, in fulcio-server logs:
+# "There was an error processing the identity token"
 ```
 
-Or `scripts/verify.sh` Check 13 fails with `OIDC issuer is 'https://10.x.x.x/...'`.
+Or `scripts/verify.sh` Check 13 fails with an unexpected issuer URL.
 
-**Cause:**
-minikube was started without the `--extra-config=apiserver.service-account-issuer` flag, so the Kubernetes API server uses an auto-generated issuer URL that Fulcio cannot validate.
+**Cause (minikube):**
+minikube was started without the `--extra-config=apiserver.service-account-issuer` flag,
+so the Kubernetes API server uses an auto-generated issuer URL that Fulcio cannot validate.
 
-**Fix:**
+**Fix (minikube):**
 ```bash
-# Stop and restart minikube with the correct flags
 minikube stop
 bash scripts/start-minikube.sh
 
@@ -32,6 +34,27 @@ bash scripts/start-minikube.sh
 kubectl get --raw /.well-known/openid-configuration | python3 -c "import sys,json; print(json.load(sys.stdin)['issuer'])"
 # Expected: https://kubernetes.default.svc
 ```
+
+**Cause (AKS):**
+Fulcio's `OIDCIssuers` config doesn't include the AKS-managed issuer URL, or `chart/values-aks.local.yaml` was not rendered before `helm install` ran. The AKS issuer looks like `https://<region>.oic.prod-aks.azure.com/<tenant-guid>/<cluster-guid>/`.
+
+**Fix (AKS):**
+```bash
+# Confirm the live issuer and ensure it is in the rendered values file:
+terraform -chdir=infra/aks output -raw oidc_issuer_url
+grep -A2 OIDCIssuers chart/values-aks.local.yaml
+
+# If missing, re-render and re-upgrade:
+bash scripts/aks-up.sh           # idempotent — re-renders values-aks.local.yaml
+helm upgrade devsecops-demo chart/ -f chart/values-aks.local.yaml --wait
+# Fulcio configmap-only changes require a pod restart:
+kubectl rollout restart deploy/fulcio-server -n fulcio-system
+```
+
+> **Note:** the Fulcio sub-chart consumes `scaffold.fulcio.config.contents` as a complete
+> JSON blob (Pascal-case keys: `OIDCIssuers`, `IssuerURL`, `ClientID`, `Type`). The
+> chart's `OIDCIssuers` list intentionally contains **both** the AKS issuer and
+> `https://kubernetes.default.svc` so the same configuration works on either target.
 
 ---
 
@@ -132,6 +155,151 @@ kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=step-certificat
 kubectl delete job signing-job-smallstep -n workload --ignore-not-found=true
 kubectl apply -f chart/templates/workload/signing-job-smallstep.yaml
 ```
+
+---
+
+## 5a. Kyverno webhook race during install — `no endpoints available for service ...kyverno-svc`
+
+**Symptom (during `scripts/install.sh`, most often on AKS cold starts):**
+```
+Error: failed post-install: warning: Hook post-install
+devsecops-demo/templates/policy/cluster-image-policy.yaml failed:
+Internal error occurred: failed calling webhook "mutate-policy.kyverno.svc":
+failed to call webhook: Post "https://devsecops-demo-kyverno-svc.policy.svc:443/policymutate?timeout=10s":
+no endpoints available for service "devsecops-demo-kyverno-svc"
+```
+
+**Cause:**
+The `require-image-signature` ClusterPolicy was applied before Kyverno's
+admission-controller pods registered any ready endpoints for
+`devsecops-demo-kyverno-svc`. Helm hook weights only sequence among hooks —
+they do not wait for regular chart resources (like Kyverno's Deployment)
+to become Ready. With `--wait` deliberately omitted in `install.sh`
+(demo workload Jobs would otherwise block), Helm fires the post-install
+hook before Kyverno is admission-ready. AKS cold starts (~30–90s for
+admission-controller pods) make the race almost certain; minikube usually
+masks it.
+
+**Fix (already applied in this repo):**
+- `chart/templates/policy/cluster-image-policy.yaml` no longer uses
+  `helm.sh/hook` annotations; it is gated behind
+  `.Values.workload.policy.installClusterPolicy` (default `false`).
+- `scripts/install.sh` adds the Kyverno admission-controller Deployment to
+  its readiness wait list, then polls `endpoints/<release>-kyverno-svc`
+  until populated, then runs a second
+  `helm upgrade --reuse-values --set workload.policy.installClusterPolicy=true`
+  to apply the policy.
+
+**Recovery from a previously failed install (Helm release stuck in `failed` state):**
+```bash
+# Fast path — non-interactive forceful reset (cluster stays up):
+bash scripts/cleanup.sh                            # interactive prompt
+FORCE=true bash scripts/cleanup.sh                 # CI-friendly
+FORCE=true PURGE_CRDS=true bash scripts/cleanup.sh # also drop demo CRDs
+
+# Manual equivalent:
+helm uninstall devsecops-demo -n pki --no-hooks    # --no-hooks avoids the
+                                                   #   missing-webhook callback
+bash scripts/install.sh                            # re-run installer
+```
+
+If a `helm uninstall` ever leaves namespaces in `Terminating` state because
+orphan Kyverno `ValidatingWebhookConfigurations` block cluster-wide deletes,
+`scripts/cleanup.sh` deletes those webhook configurations *first*, then
+force-deletes pods/jobs/deployments, releases PVC finalizers, and (optionally)
+purges CRDs. See **5b** below for the manual recipe.
+
+If you ever need to apply the policy manually (e.g. you ran the chart with
+your own `helm install`):
+```bash
+kubectl wait --for=condition=Available deployment/devsecops-demo-kyverno-admission-controller \
+  -n policy --timeout=5m
+# Wait for endpoints to populate (no native kubectl wait for endpoints presence):
+until [ -n "$(kubectl get endpoints devsecops-demo-kyverno-svc -n policy \
+  -o jsonpath='{.subsets[*].addresses[*].ip}')" ]; do sleep 5; done
+helm upgrade devsecops-demo chart/ -n pki --reuse-values \
+  --set workload.policy.installClusterPolicy=true
+```
+
+---
+
+## 5. Kyverno webhook timeout — policy enforcement blocks everything
+
+## 5b. Stuck namespaces / orphan Kyverno webhooks block all cluster deletes
+
+**Symptom:**
+After a partial install (or after `helm uninstall` is interrupted), you see:
+```
+Error from server (InternalError): Internal error occurred: failed calling
+webhook "validate.kyverno.svc-fail": failed to call webhook: Post
+"https://devsecops-demo-kyverno-svc.policy.svc:443/validate/fail?timeout=10s":
+service "devsecops-demo-kyverno-svc" not found
+```
+…on *every* subsequent `kubectl delete`. Demo namespaces (e.g. `pki`,
+`workload`, `rekor-system`) stay in `Terminating` indefinitely, and
+`helm uninstall ... --no-hooks` errors with `release: not found` even
+though pods remain.
+
+**Cause:**
+Kyverno's `ValidatingWebhookConfiguration` resources are cluster-scoped and
+survive their namespace's deletion. They have `failurePolicy: Fail` and
+point at `devsecops-demo-kyverno-svc.policy.svc`. Once that Service has no
+ready endpoints (because the admission-controller pods or the entire `policy`
+namespace are gone), every cluster-wide create/update/delete operation that
+the webhook would intercept fails with the error above. Namespaces in
+`Terminating` state can't drop their remaining objects → the cycle never
+breaks.
+
+**Fix (one-shot script):**
+```bash
+bash scripts/cleanup.sh                 # interactive
+FORCE=true bash scripts/cleanup.sh      # non-interactive
+```
+The script (a) deletes the orphan Kyverno
+`Validating`/`MutatingWebhookConfigurations` *first*, (b) runs
+`helm uninstall --no-hooks`, (c) force-deletes pods/jobs/workloads
+in every demo namespace, (d) patches out PVC finalizers, and
+(e) clears namespace finalizers via the `/finalize` subresource for any
+namespace still stuck after a configurable wait.
+
+**Manual recovery (if the script is unavailable):**
+```bash
+# 1. Remove the orphan webhook configurations FIRST.
+kubectl get validatingwebhookconfigurations,mutatingwebhookconfigurations \
+  -o name | grep -i kyverno | xargs -r kubectl delete
+
+# 2. Helm uninstall (now safe because webhooks won't intercept).
+helm uninstall devsecops-demo -n pki --no-hooks || true
+
+# 3. Force-delete remaining workloads in each demo namespace.
+for ns in pki workload policy registry fulcio-system rekor-system \
+          tuf-system trillian-system ctlog-system; do
+  kubectl delete jobs,deployments,replicasets,statefulsets,pods \
+    --all -n "$ns" --grace-period=0 --force --ignore-not-found
+done
+
+# 4. Release PVC finalizers (release the underlying disks).
+for ns in pki registry rekor-system trillian-system; do
+  for pvc in $(kubectl get pvc -n "$ns" -o name 2>/dev/null); do
+    kubectl patch "$pvc" -n "$ns" --type=merge \
+      -p '{"metadata":{"finalizers":null}}'
+  done
+done
+
+# 5. If a namespace is still Terminating after a minute, clear its
+#    own finalizer via the /finalize subresource (last resort).
+for ns in $(kubectl get ns -o json | \
+  jq -r '.items[] | select(.status.phase=="Terminating") | .metadata.name'); do
+  kubectl get ns "$ns" -o json \
+    | jq '.spec.finalizers=[]' \
+    | kubectl replace --raw "/api/v1/namespaces/$ns/finalize" -f -
+done
+```
+
+**Prevention:**
+Always run `bash scripts/cleanup.sh` (or `bash scripts/uninstall.sh`) instead
+of `helm uninstall` alone, and never `kubectl delete ns policy` before the
+Kyverno webhook configurations are gone.
 
 ---
 
@@ -269,3 +437,156 @@ On macOS, prevent sleep while the demo is running:
 ```bash
 caffeinate -d &  # Prevents display sleep; kill it after the demo
 ```
+
+---
+
+## AKS-Specific Issues
+
+### A1. `terraform apply` fails: VM SKU not allowed in region
+
+**Symptom:**
+```
+SkuNotAvailable: The requested VM size 'Standard_D2s_v5' is not available in location 'australiaeast'
+# or
+SkuNotAvailable: ... not authorized for the subscription
+```
+
+**Cause:**
+The default `node_vm_size` in `infra/aks/variables.tf` isn't enabled for your
+subscription or region.
+
+**Fix:**
+```bash
+# List SKUs your subscription can use in the target region:
+az vm list-skus --location australiaeast --resource-type virtualMachines \
+  --query "[?capabilities[?name=='vCPUs' && value=='2']].name" -o tsv | sort -u
+
+# Override the variable:
+cd infra/aks
+echo 'node_vm_size = "Standard_D4s_v5"' >> terraform.tfvars
+terraform apply
+```
+
+### A2. `kubectl` pull error: ACR 401 / `unauthorized: authentication required`
+
+**Symptom:**
+```
+Failed to pull image "<acr>.azurecr.io/demo/app:latest": ... 401 Unauthorized
+```
+
+**Cause:**
+The AKS kubelet User-Assigned Managed Identity is missing the `AcrPull` role on the ACR.
+This is created by `infra/aks/main.tf` (`azurerm_role_assignment.acr_pull`); if you
+provisioned ACR separately, the role binding is missing.
+
+**Fix:**
+```bash
+ACR_ID=$(terraform -chdir=infra/aks output -raw acr_id 2>/dev/null \
+  || az acr show -n "<acr-name>" --query id -o tsv)
+KUBELET_OBJID=$(az aks show -g "<rg>" -n "<cluster>" \
+  --query identityProfile.kubeletidentity.objectId -o tsv)
+az role assignment create --assignee-object-id "$KUBELET_OBJID" \
+  --assignee-principal-type ServicePrincipal --role AcrPull --scope "$ACR_ID"
+```
+
+For host-side push 401 errors, refresh the ACR token (expires after ~3 hours):
+```bash
+az acr login -n <acr-name>
+```
+
+### A3. `aks-up.sh` re-run produces a new OIDC issuer URL
+
+**Symptom:**
+Demos 3/4/5/6 start failing after re-running `aks-up.sh` against a destroyed cluster.
+
+**Cause:**
+The AKS OIDC issuer is generated per cluster. A new cluster has a new issuer URL,
+and the previously-installed Fulcio configmap still lists the old one.
+
+**Fix:**
+```bash
+bash scripts/aks-up.sh           # re-renders chart/values-aks.local.yaml
+helm upgrade devsecops-demo chart/ -f chart/values-aks.local.yaml --wait
+kubectl rollout restart deploy/fulcio-server -n fulcio-system
+```
+
+### A4. Wrong `kubectl` context — commands hit minikube instead of AKS (or vice versa)
+
+**Symptom:**
+`scripts/_cluster-detect.sh` reports the wrong `CLUSTER_KIND`; demos use the wrong
+registry.
+
+**Fix:**
+```bash
+kubectl config get-contexts
+kubectl config use-context <minikube | aks-context-name>
+# Re-source the helper to refresh exported variables:
+source scripts/_cluster-detect.sh
+echo "$CLUSTER_KIND $REGISTRY"
+```
+
+### A5. Idle AKS cost — forgot to tear down
+
+`aks-down.sh` runs `terraform destroy` in `infra/aks/` (also best-effort
+`helm uninstall`). Run it whenever you're done — the cluster + ACR Premium accrue
+charges 24/7 even when idle.
+
+```bash
+bash scripts/aks-down.sh
+```
+
+### A6. `demo-app-signed` CrashLoopBackOff on AKS — `exec format error`
+
+**Symptom:**
+```
+kubectl get pod -n workload
+# demo-app-signed-xxx   0/1   CrashLoopBackOff
+kubectl logs -n workload demo-app-signed-xxx --previous
+# exec ./demo-app: exec format error
+```
+
+**Cause:**
+You built the image on an Apple Silicon (arm64) Mac without specifying a target
+platform, so `docker build` produced an arm64 image. AKS node pools are amd64
+by default.
+
+**Fix:**
+The fix is already in `demos/demo-app/build-and-push.sh` and `demos/demo4-cicd/run.sh` —
+on AKS they default to `TARGET_PLATFORM=linux/amd64` and pass `--platform` to
+docker/podman. If you have arm64 AKS nodes instead, override:
+
+```bash
+TARGET_PLATFORM=linux/arm64 bash demos/demo-app/build-and-push.sh
+```
+
+After rebuilding, force the kubelet to drop the cached image (see A7).
+
+### A7. AKS kubelet keeps using the old cached image — "Container image already present on machine"
+
+**Symptom:**
+You rebuilt and re-pushed `demo/app:latest`, but the pod still uses the previous
+image. `kubectl describe pod` shows:
+```
+Successfully assigned ... Container image "<acr>/demo/app:latest" already present on machine
+```
+…and no `Pulling image` event.
+
+**Cause:**
+Kubelet's default `imagePullPolicy` is `IfNotPresent`. With the `:latest` tag,
+re-pushing **does not** invalidate the cache — the node keeps the old image.
+This bites hardest right after fixing an arch mismatch (A6) because the cached
+arm64 image keeps crashing even though the registry now holds the correct amd64
+build.
+
+**Fix:**
+The demo4 and demo5 deployment specs now hardcode `imagePullPolicy: Always`. If
+you still see a stale cached image (e.g. for the chart's signing-job workloads):
+
+```bash
+kubectl rollout restart deploy/demo-app-signed -n workload
+# Or, more aggressively:
+kubectl delete pod -n workload -l app=demo-app-signed
+```
+
+For your own manifests, always set `imagePullPolicy: Always` when using mutable
+tags like `:latest`. Use immutable digest references (`@sha256:…`) in production.

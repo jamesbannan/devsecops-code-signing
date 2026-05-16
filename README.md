@@ -5,11 +5,15 @@
 
 A complete, self-contained demonstration environment that deploys a full code-signing stack
 via a single `helm install`. Covers Smallstep CA signing, Sigstore keyless signing, Docker
-Registry v2, and Kyverno policy enforcement — all running in a local Kubernetes cluster.
+Registry v2, and Kyverno policy enforcement — running on a **local minikube cluster** or
+on **Azure Kubernetes Service** (provisioned end-to-end via Terraform). All six demo
+scripts auto-detect the target and behave identically.
 
 ---
 
-## Quickstart (~20 minutes)
+## Quickstart — Local minikube (~20 minutes)
+
+For an end-to-end **Azure AKS** deployment, see [Cloud Deployment](#cloud-deployment) below.
 
 ### Prerequisites
 
@@ -73,7 +77,11 @@ signing jobs complete.
 bash demos/demo-app/build-and-push.sh
 ```
 
-Builds the Go demo application and pushes it to the local registry at `localhost:30500`.
+Builds the Go demo application and pushes it to the local registry at `localhost:30500`
+(or your ACR on AKS). **Required** before running demos 2, 3, and 6 (those demos sign or
+inspect the pre-existing `demo/app:latest` image). Demo 4 builds the image itself as
+part of the pipeline simulation; Demos 1 and 5 don't need it. See
+[`demos/README.md`](demos/README.md#per-demo-image-prerequisites) for the full matrix.
 
 ### Step 5 — Run the demos
 
@@ -223,22 +231,75 @@ baked into the Helm chart values.
 ## Cleanup
 
 ```bash
-bash scripts/uninstall.sh   # Helm uninstall + optional namespace/cluster deletion
+bash scripts/uninstall.sh   # Interactive: Helm uninstall + optional namespace/cluster deletion
+bash scripts/cleanup.sh     # Non-interactive forceful reset (cluster stays up)
 ```
+
+`cleanup.sh` is the right choice when a `helm uninstall` got stuck (orphan
+Kyverno webhooks, terminating namespaces, PVCs with finalizers) and you just
+want to re-run `install.sh` without paying the AKS cluster creation cost again.
+Supports `FORCE=true` (skip prompt) and `PURGE_CRDS=true` (also drop demo CRDs).
+
+### After the demo laptop has slept
+
+`kubectl port-forward` processes survive sleep but their TCP connections don't —
+endpoints will appear to listen and then immediately reset. Run:
+
+```bash
+bash scripts/resume.sh
+```
+
+This kills any dead port-forwards (recorded **and** orphaned), re-fetches AKS
+credentials if the token has expired (or restarts minikube if it stopped),
+restarts the forwards, and probes each endpoint with curl to confirm the
+environment is healthy before you start the next demo.
 
 ---
 
 ## Cloud Deployment
 
-Override files for cloud environments:
+### Azure AKS — provisioned end-to-end
+
+The repository ships a Terraform stack and bootstrap scripts that provision a
+dev/test AKS cluster + Azure Container Registry in **australiaeast** (configurable),
+then deploy the same Helm chart and run the same demo scripts unchanged.
+
+**Additional prerequisites**
+
+| Tool | Version | Install |
+|------|---------|---------|
+| Terraform | 1.5+ | `tfenv install 1.15.3 && tfenv use 1.15.3` (or any 1.5+) |
+| Azure CLI | 2.60+ | `brew install azure-cli` |
+
+**Quickstart**
 
 ```bash
-# Azure AKS
-helm upgrade --install devsecops-demo chart/ \
-  -f chart/values-aks.yaml \
-  --set global.registry=myacr.azurecr.io \
-  --wait --timeout 15m
+az login                                 # authenticate
+az account set --subscription <name|id>  # select target subscription
 
+bash scripts/aks-up.sh                   # terraform apply + render values-aks.local.yaml (~10 min)
+bash scripts/install.sh                  # auto-picks chart/values-aks.local.yaml
+bash demos/demo-app/build-and-push.sh    # builds + az acr login + docker push
+bash demos/demo1-before/run.sh           # ... run any demo; scripts auto-detect AKS
+bash scripts/aks-down.sh                 # tear everything down (~5 min)
+```
+
+`scripts/aks-up.sh` provisions an `azurerm_resource_group`, `azurerm_container_registry`,
+`azurerm_user_assigned_identity`, and `azurerm_kubernetes_cluster` (workload-identity +
+OIDC enabled). It uses a **local** Terraform state file under `infra/aks/` (gitignored).
+
+The bootstrap renders `chart/values-aks.local.yaml` from the committed
+`chart/values-aks.yaml` template, substituting the live ACR login server and AKS
+OIDC issuer URL so Fulcio accepts ServiceAccount tokens from the AKS-managed issuer.
+
+See `infra/aks/README.md` for Terraform variable reference (region, VM SKU,
+Kubernetes version) and operator notes.
+
+### Other clouds (manual)
+
+The chart also ships untested values overrides for EKS and GKE:
+
+```bash
 # AWS EKS
 helm upgrade --install devsecops-demo chart/ \
   -f chart/values-eks.yaml \
@@ -263,23 +324,30 @@ devsecops-demo/
 ├── chart/                    ← Umbrella Helm chart
 │   ├── Chart.yaml            ← Dependencies: scaffold + kyverno + step-certificates
 │   ├── values.yaml           ← Local/minikube defaults
-│   ├── values-aks.yaml       ← Azure overrides
-│   ├── values-eks.yaml       ← AWS overrides
-│   ├── values-gke.yaml       ← GCP overrides
+│   ├── values-aks.yaml       ← Azure overrides (template; values-aks.local.yaml is rendered)
+│   ├── values-eks.yaml       ← AWS overrides (untested)
+│   ├── values-gke.yaml       ← GCP overrides (untested)
 │   └── templates/
 │       ├── namespaces.yaml
 │       ├── pki/              ← CA root propagation, TUF secret copy, code signing config
 │       ├── registry/         ← Docker Registry v2
 │       ├── workload/         ← Signing jobs + verification + demo app
 │       └── policy/           ← Kyverno ClusterPolicies
+├── infra/
+│   └── aks/                  ← Terraform stack for dev/test AKS + ACR + UAMI
 ├── scripts/
-│   ├── start-minikube.sh
-│   ├── install.sh
+│   ├── start-minikube.sh     ← minikube bootstrap
+│   ├── aks-up.sh             ← AKS bootstrap: terraform apply + kubeconfig + values render
+│   ├── aks-down.sh           ← AKS teardown: helm uninstall + terraform destroy
+│   ├── _cluster-detect.sh    ← Sourced helper: exports CLUSTER_KIND, CLUSTER_REGISTRY, etc.
+│   ├── install.sh            ← Helm install (auto-picks values-aks.local.yaml on AKS)
 │   ├── port-forward.sh
+│   ├── resume.sh             ← Re-establish port-forwards after laptop wakes from sleep
 │   ├── verify.sh
+│   ├── cleanup.sh            ← Forceful reset (no cluster teardown; for stuck installs)
 │   └── uninstall.sh
 ├── demos/
-│   ├── demo-app/             ← Go HTTP server + Dockerfile
+│   ├── demo-app/             ← Go HTTP server + Dockerfile + build-and-push.sh
 │   ├── demo1-before/         ← Manual GPG signing
 │   ├── demo2-smallstep/      ← Smallstep CA path
 │   ├── demo3-sigstore/       ← Sigstore keyless path
@@ -309,7 +377,7 @@ The `scripts/verify.sh` script checks all of the following:
 10. Fulcio root cert returns valid PEM
 11. TUF root.json is available
 12. cosign TUF root is initialised
-13. OIDC issuer is https://kubernetes.default.svc
+13. OIDC issuer is appropriate for the cluster (`https://kubernetes.default.svc` on minikube; AKS-managed issuer URL on AKS)
 14. Kyverno running + ClusterPolicy exists
 15. Smallstep signing round-trip
 16. Sigstore keyless signing round-trip
@@ -322,10 +390,12 @@ The `scripts/verify.sh` script checks all of the following:
 
 | Issue | Impact | Workaround |
 |-------|--------|------------|
-| **Docker Desktop VM networking** (macOS) | `docker push localhost:30500` fails because the daemon runs inside a HyperKit/QEMU VM that cannot reach host port-forwards | Scripts auto-detect minikube and use `minikube image build` + `ctr push` via ClusterIP. |
+| **Docker Desktop VM networking** (macOS, minikube only) | `docker push localhost:30500` fails because the daemon runs inside a VM that cannot reach host port-forwards | Scripts auto-detect minikube and use `minikube image build` + `ctr push` via ClusterIP. On AKS, images go straight to ACR. |
+| **AVM `ptn-aks-dev` SKU hardcode** | The Azure Verified Module hard-codes `Standard_DS2_v2` and `load_balancer_sku = basic`, both blocked in some subscriptions/regions | `infra/aks/main.tf` inlines an equivalent native resource set and exposes `node_vm_size` (default `Standard_D2s_v5`) and `standard` load-balancer SKU. |
 | **Trillian MySQL slow start** (Apple Silicon) | MySQL may take 2–3 minutes to pass readiness probes on ARM64 | `install.sh` allows up to 10 minutes. Probe timeouts are tuned in `values.yaml`. |
 | **Workload Job warnings** | Checks 15/16/18 in `verify.sh` warn until the demo image exists | Run `demos/demo-app/build-and-push.sh` first, then re-run `verify.sh`. |
 | **cosign v3 bundle format** | Kyverno v1.15 doesn't fully support cosign v3's OCI referrer-based signatures | Demo5 re-signs with `--new-bundle-format=false` for Kyverno compatibility. |
+| **AKS image-arch mismatch** | Building on Apple Silicon defaults to arm64; AKS nodes are amd64 → `exec format error` / CrashLoopBackOff | Scripts on AKS default to `TARGET_PLATFORM=linux/amd64`. Override with `TARGET_PLATFORM=linux/arm64` for arm64 node pools. See troubleshooting A6/A7. |
 | **Kyverno + local Sigstore** | ClusterPolicy needs Fulcio root cert, Rekor pubkey, and `ignoreSCT: true` for local infrastructure | Demo5 patches the policy at runtime; values are sourced from cluster Secrets. |
 
 ---
