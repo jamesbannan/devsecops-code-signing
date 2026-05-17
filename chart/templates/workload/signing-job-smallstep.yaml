@@ -17,6 +17,7 @@ metadata:
     app.kubernetes.io/component: signing-smallstep
 spec:
   backoffLimit: 2
+  ttlSecondsAfterFinished: 300
   template:
     metadata:
       labels:

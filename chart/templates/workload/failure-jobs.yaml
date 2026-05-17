@@ -25,6 +25,7 @@ metadata:
     description: "Demonstrates cosign verify failure when image digest has been tampered with"
 spec:
   backoffLimit: 0
+  ttlSecondsAfterFinished: 300
   template:
     metadata:
       labels:
@@ -119,6 +120,7 @@ metadata:
     description: "Demonstrates Kyverno blocking deployment of an unsigned image"
 spec:
   backoffLimit: 0
+  ttlSecondsAfterFinished: 300
   template:
     metadata:
       labels:
@@ -206,6 +208,7 @@ metadata:
     description: "Explains the 5-minute cert TTL on Smallstep-issued signing certificates"
 spec:
   backoffLimit: 0
+  ttlSecondsAfterFinished: 300
   template:
     metadata:
       labels:

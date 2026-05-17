@@ -23,6 +23,7 @@ metadata:
     app.kubernetes.io/component: signing-sigstore
 spec:
   backoffLimit: 2
+  ttlSecondsAfterFinished: 300
   template:
     metadata:
       labels:
