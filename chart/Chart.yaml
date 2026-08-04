@@ -1,7 +1,7 @@
 apiVersion: v2
 name: devsecops-demo
 description: >
-  Automated code signing demonstration environment for BSides Melbourne 2026.
+  Automated code signing demonstration environment.
   Deploys Smallstep CA, Sigstore (Fulcio + Rekor + ctlog + TUF), Docker Registry v2,
   demo workloads, and Kyverno policy enforcement in a single helm install.
 version: 0.1.0

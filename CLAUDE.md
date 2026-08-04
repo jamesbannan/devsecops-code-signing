@@ -5,7 +5,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project
 
 `jamesbannan/devsecops-code-signing` is a complete, self-contained DevSecOps code-signing
-demo for BSides Melbourne 2026. A single Helm chart deploys step-ca, Sigstore (Fulcio +
+demo backing the conference talk "Zero-Friction DevSecOps: Automated Code Signing Done
+Right" (BSides Melbourne 2026 · AppSec Australia · KCD Melbourne 2026). A single Helm
+chart deploys step-ca, Sigstore (Fulcio +
 Rekor + TUF + Trillian via the `scaffold` chart), an in-cluster Docker Registry v2, and
 Kyverno policy enforcement. Six demo scripts walk through GPG → Smallstep CA → Sigstore
 keyless → CI/CD → policy enforcement → audit.
@@ -20,7 +22,9 @@ AKS with workload identity + OIDC).
   `values-aks.local.yaml` is rendered by `aks-up.sh`)
 - `scripts/` — `start-minikube.sh`, `aks-up.sh` / `aks-down.sh`, `install.sh`,
   `verify.sh`, `port-forward.sh`, `resume.sh` (re-establish port-forwards
-  after laptop sleep), `uninstall.sh`, `cleanup.sh` (forceful
+  after laptop sleep), `reset-demo.sh` (soft reset: wipe `workload` Jobs/pods
+  + `helm upgrade --force-conflicts` to redeploy and reset the Kyverno policy,
+  leaving core PKI up), `uninstall.sh`, `cleanup.sh` (forceful
   non-interactive reset), and the sourced helper
   `_cluster-detect.sh` (exports `CLUSTER_KIND`, `REGISTRY`, `CLUSTER_REGISTRY`,
   `ACR_LOGIN_SERVER`, `AKS_OIDC_ISSUER_URL`)

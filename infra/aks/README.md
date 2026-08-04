@@ -13,7 +13,7 @@ The shape and identity boundaries match the AVM module so the chart's
 assumptions (OIDC issuer enabled, workload identity, AcrPull role assignment)
 all hold.
 
-The cluster is intended for the BSides Melbourne 2026 DevSecOps code-signing demo
+The cluster is intended for the DevSecOps code-signing demo
 and is **not** production-hardened. State is held in a local `terraform.tfstate`
 file (gitignored).
 

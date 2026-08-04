@@ -27,7 +27,7 @@ variable "tags" {
   default = {
     project = "devsecops-code-signing"
     env     = "dev"
-    purpose = "bsides-melbourne-demo"
+    purpose = "code-signing-demo"
   }
 }
 
