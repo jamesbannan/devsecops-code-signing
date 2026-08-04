@@ -585,17 +585,28 @@ even though signed workloads are running and Kyverno is healthy.
 
 **Cause:**
 
-Kyverno's reports controller writes a PolicyReport once per resource and then
-tracks it by UID. If the PolicyReports are deleted out from under it (for
-example `kubectl delete policyreport -n workload --all` while debugging), the
-controller does **not** notice and will not recreate them. A `kubectl rollout
-restart` of the workload does not help either — the reports only reappear at the
-next full background scan, which defaults to one hour.
+Kyverno's reports controller can settle into a state where it evaluates
+policies normally — the logs show `image attestors verification succeeded` —
+but never writes the PolicyReports. This has been observed on a **freshly
+installed cluster** with nothing deleted by hand, so it is not simply a
+side effect of debugging.
 
-Note that none of the demo or reset scripts delete PolicyReports.
+Restarting the workload does not help; the reports otherwise only reappear at
+the next full background scan, which defaults to one hour.
+
+Check that reporting is actually enabled before chasing anything else — it
+should list `imageVerify`:
+
+```bash
+kubectl get deploy kyverno-reports-controller -n policy \
+  -o jsonpath='{.spec.template.spec.containers[0].args}' | tr ',' '\n' | grep enableReporting
+# --enableReporting=validate,mutate,mutateExisting,imageVerify,generate
+```
+
+Deleting the reports by hand (`kubectl delete policyreport -n workload --all`)
+produces the same symptom. Note that none of the demo or reset scripts do this:
 `scripts/reset-demo.sh` deliberately leaves them alone, and `scripts/cleanup.sh`
 removes the whole namespace (a fresh `install.sh` then regenerates everything).
-You only hit this by deleting them by hand.
 
 **Fix — force an immediate resync:**
 
@@ -606,6 +617,16 @@ kubectl rollout status  deployment/kyverno-reports-controller -n policy --timeou
 # Reports reappear within about 90 seconds
 kubectl get policyreport -n workload
 ```
+
+Deployment-scoped reports land first and carry only the autogen audit rule.
+The `check-image-signature` result — the one worth showing an audience — comes
+with the Pod-scoped reports slightly later, so wait for that rather than for a
+non-zero report count.
+
+**Demo 6 handles this automatically.** If it finds no PolicyReports at startup
+it triggers the resync in the background and, at the report step, waits for a
+`check-image-signature` result to appear. The recovery therefore overlaps the
+narration instead of stalling the demo. Set `DEMO6_NO_NUDGE=true` to disable.
 
 **Related: `FAIL=1` on a correctly signed image**
 

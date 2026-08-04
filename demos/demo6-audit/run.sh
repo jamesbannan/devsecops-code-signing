@@ -106,6 +106,24 @@ narrate "Attestations prove HOW the image was built and WHERE it came from."
 narrate "Together, they give CISOs a complete, verifiable provenance chain."
 sleep 2
 
+# Kyverno's reports controller sometimes settles into a state where it
+# evaluates policies (the logs show verification succeeding) but never writes
+# the PolicyReports. Restarting it fixes that within ~90 seconds, but a dead
+# pause is the last thing wanted during the closing audit story.
+#
+# So nudge it here, in the background, if there is nothing to show yet. Step 4
+# is several minutes of narration away, by which point the reports have
+# reappeared. Set DEMO6_NO_NUDGE=true to disable.
+if [ "${DEMO6_NO_NUDGE:-false}" != "true" ]; then
+  if [ "$(kubectl get policyreport -n workload --no-headers 2>/dev/null | wc -l | tr -d ' ')" = "0" ]; then
+    KYVERNO_NS=$(kubectl get deploy -A -o jsonpath='{range .items[?(@.metadata.name=="kyverno-reports-controller")]}{.metadata.namespace}{end}' 2>/dev/null)
+    if [ -n "$KYVERNO_NS" ]; then
+      note "No PolicyReports yet — prompting Kyverno's reports controller to resync ..."
+      kubectl rollout restart deployment/kyverno-reports-controller -n "$KYVERNO_NS" >/dev/null 2>&1 || true
+    fi
+  fi
+fi
+
 # =============================================================================
 header "Step 1: Create a provenance attestation"
 # =============================================================================
@@ -295,6 +313,27 @@ cmd "kubectl get policyreport -n workload"
 echo ""
 
 REPORT_COUNT=$(kubectl get policyreport -n workload --no-headers 2>/dev/null | wc -l | tr -d ' ')
+
+# Give the resync triggered at the start of the demo a chance to land.
+#
+# Wait for a check-image-signature result specifically, not merely for any
+# report: the Deployment-scoped reports appear first and only carry the
+# autogen audit rule, while the signature verification result — the whole
+# point of this step — lands with the Pod-scoped reports a little later.
+if [ "${DEMO6_NO_NUDGE:-false}" != "true" ]; then
+  have_sig_result() {
+    kubectl get policyreport -n workload \
+      -o jsonpath='{range .items[*].results[*]}{.rule}{"\n"}{end}' 2>/dev/null \
+      | grep -q 'check-image-signature'
+  }
+  if ! have_sig_result; then
+    for _ in $(seq 1 25); do
+      sleep 3
+      have_sig_result && break
+    done
+  fi
+  REPORT_COUNT=$(kubectl get policyreport -n workload --no-headers 2>/dev/null | wc -l | tr -d ' ')
+fi
 
 if [ "$REPORT_COUNT" -gt 0 ]; then
   kubectl get policyreport -n workload --no-headers 2>/dev/null | head -10 | \
