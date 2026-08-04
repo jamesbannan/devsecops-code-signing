@@ -63,7 +63,10 @@ printf "  Delete component namespaces? (pki, registry, workload, policy)\n"
 printf "  ${YELLOW}This will delete all PersistentVolumeClaims and data.${NC}\n"
 printf "  [y/N] "
 read -r ans
-if [[ "${ans,,}" == "y" ]]; then
+# Lowercase without bash 4 `${ans,,}` — macOS ships bash 3.2 (/usr/bin/env bash),
+# where `${ans,,}` is a "bad substitution".
+ans=$(printf '%s' "$ans" | tr '[:upper:]' '[:lower:]')
+if [ "$ans" = "y" ]; then
   for ns in pki registry workload policy; do
     if kubectl get namespace "$ns" &>/dev/null; then
       kubectl delete namespace "$ns" --timeout=60s 2>/dev/null && \
@@ -85,7 +88,10 @@ printf "  Delete the minikube cluster?\n"
 printf "  ${RED}WARNING: This is irreversible and will delete all cluster data.${NC}\n"
 printf "  [y/N] "
 read -r ans2
-if [[ "${ans2,,}" == "y" ]]; then
+# Lowercase without bash 4 `${ans2,,}` — macOS ships bash 3.2 (/usr/bin/env bash),
+# where `${ans2,,}` is a "bad substitution" that would silently skip this step.
+ans2=$(printf '%s' "$ans2" | tr '[:upper:]' '[:lower:]')
+if [ "$ans2" = "y" ]; then
   if command -v minikube &>/dev/null; then
     minikube delete
     ok "Minikube cluster deleted"

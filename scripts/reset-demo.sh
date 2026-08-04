@@ -37,6 +37,7 @@ CHART_DIR="$REPO_ROOT/chart"
 RELEASE_NAME="${RELEASE_NAME:-devsecops-demo}"
 HELM_NAMESPACE="${HELM_NAMESPACE:-pki}"
 FORCE="${FORCE:-false}"
+PID_FILE="/tmp/devsecops-pf.pids"
 PURGE_IMAGES=false
 REDEPLOY=true
 
@@ -84,7 +85,10 @@ if [ "$FORCE" != "true" ]; then
   printf "  will be left untouched.\n"
   printf "  Continue? [y/N] "
   read -r ans
-  if [[ "${ans,,}" != "y" && "${ans,,}" != "yes" ]]; then
+  # Lowercase without bash 4 `${ans,,}` — macOS ships bash 3.2 (/usr/bin/env bash),
+  # where `${ans,,}` is a "bad substitution".
+  ans=$(printf '%s' "$ans" | tr '[:upper:]' '[:lower:]')
+  if [ "$ans" != "y" ] && [ "$ans" != "yes" ]; then
     info "Aborted."
     exit 0
   fi
@@ -179,9 +183,35 @@ if [ "$REDEPLOY" = "true" ]; then
     # the deleted Jobs as drift and reapplying them. --reuse-values keeps
     # whatever values the original install was performed with (incl. the AKS
     # local override file via -f).
+    #
+    # --force-conflicts is required because the demos `kubectl patch` the Kyverno
+    # `require-image-signature` ClusterPolicy (demo5 flips validationFailureAction
+    # to Enforce and mutateDigest to true). That creates a `kubectl-patch`
+    # server-side-apply field manager owning `.spec.rules`, which collides with
+    # Helm 4's server-side apply ("conflict with kubectl-patch ... .spec.rules").
+    # Forcing conflicts lets Helm reclaim ownership and reset the policy to the
+    # chart defaults — exactly what a reset should do.
     if helm upgrade "$RELEASE_NAME" "$CHART_DIR" \
-         -n "$HELM_NAMESPACE" --reuse-values --timeout 5m 2>&1 | tail -5; then
+         -n "$HELM_NAMESPACE" --reuse-values --force-conflicts --timeout 5m 2>&1 | tail -5; then
       ok "Workload Jobs reapplied"
+
+      # The helm upgrade re-runs the step-ca codesigning-config hook
+      # (post-install,post-upgrade), which `kubectl rollout restart`s the
+      # step-ca StatefulSet to pick up the code-signing EKU config. That
+      # silently kills the `kubectl port-forward` to localhost:39000, so the
+      # next demo that talks to step-ca fails with "connection refused".
+      # Re-establish the local port-forwards if they were in use.
+      if [ -f "$PID_FILE" ]; then
+        header "Re-establishing port-forwards (helm upgrade restarted step-ca)"
+        if bash "$SCRIPT_DIR/port-forward.sh"; then
+          ok "Port-forwards re-established"
+        else
+          warn "Could not re-establish port-forwards — run 'bash scripts/resume.sh'"
+        fi
+      else
+        info "Note: the helm upgrade restarted step-ca. If you use port-forwards,"
+        info "(re)start them with: bash scripts/port-forward.sh   (or resume.sh)"
+      fi
     else
       warn "helm upgrade reported errors — check 'helm status $RELEASE_NAME -n $HELM_NAMESPACE'"
     fi

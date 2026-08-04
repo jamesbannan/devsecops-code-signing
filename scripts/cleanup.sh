@@ -95,7 +95,10 @@ if [ "$FORCE" != "true" ]; then
   printf "  PersistentVolumeClaims and their data WILL be lost.\n"
   printf "  Continue? [y/N] "
   read -r ans
-  if [[ "${ans,,}" != "y" && "${ans,,}" != "yes" ]]; then
+  # Lowercase without bash 4 `${ans,,}` — macOS ships bash 3.2 (/usr/bin/env bash),
+  # where `${ans,,}` is a "bad substitution".
+  ans=$(printf '%s' "$ans" | tr '[:upper:]' '[:lower:]')
+  if [ "$ans" != "y" ] && [ "$ans" != "yes" ]; then
     info "Aborted."
     exit 0
   fi
