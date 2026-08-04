@@ -78,10 +78,37 @@ pf() {
     ep_waited=$((ep_waited + 3))
   done
 
-  kubectl port-forward "svc/$service" "$local_port:$remote_port" \
-    -n "$namespace" \
-    >/tmp/pf-${service}.log 2>&1 &
-  local pid=$!
+  # kubectl port-forward has no reconnect logic — any API-server blip (flaky
+  # conference wifi, laptop sleep, AKS control-plane rotation) kills the tunnel
+  # permanently and takes the demo down with it. Supervise it so it self-heals.
+  # Set PF_SUPERVISE=false for a single, non-restarting port-forward.
+  local pid
+  if [ "${PF_SUPERVISE:-true}" = "true" ]; then
+    (
+      # `set -e` would kill this supervisor the moment kubectl exits non-zero
+      # (which is exactly the case we exist to recover from), so disable it here.
+      set +e
+      # Forward SIGTERM/SIGINT to the active kubectl so killing the PID in
+      # $PID_FILE (uninstall.sh, cleanup.sh, aks-down.sh) tears down cleanly.
+      pf_child=""
+      trap 'kill "$pf_child" 2>/dev/null; exit 0' TERM INT
+      while true; do
+        kubectl port-forward "svc/$service" "$local_port:$remote_port" \
+          -n "$namespace" &
+        pf_child=$!
+        wait "$pf_child" 2>/dev/null
+        printf '[%s] port-forward exited — restarting in 2s\n' \
+          "$(date '+%H:%M:%S')"
+        sleep 2
+      done
+    ) >>"/tmp/pf-${service}.log" 2>&1 &
+    pid=$!
+  else
+    kubectl port-forward "svc/$service" "$local_port:$remote_port" \
+      -n "$namespace" \
+      >/tmp/pf-${service}.log 2>&1 &
+    pid=$!
+  fi
   echo "$pid" >> "$PID_FILE"
   ok "  PID $pid — localhost:$local_port → $namespace/$service:$remote_port"
 }
