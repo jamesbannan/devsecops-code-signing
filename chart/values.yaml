@@ -408,6 +408,11 @@ workload:
     sigstore:
       enabled: true
 
+  # In-cluster job that re-verifies the demo image's signatures.
+  # Depends on the signing jobs above having produced a signature.
+  verification:
+    enabled: true
+
   # Kyverno ClusterPolicy enforcement mode.
   # Audit: log violations, do not block.
   # Enforce: block unsigned images at admission.

@@ -81,6 +81,30 @@ workload:
     image: "<YOUR_ACR_NAME>.azurecr.io/demo/app"
     tag: latest
 
+  # The in-cluster signing/verification Jobs are disabled on AKS.
+  #
+  # They were written for the in-cluster registry, which needs no credentials.
+  # Against ACR they fail for two reasons:
+  #   * cosign in the pod has no ACR credentials, so signing and verification
+  #     both fail with "UNAUTHORIZED: authentication required". The kubelet
+  #     pulls images via managed identity, but that identity is not available
+  #     to processes inside the container.
+  #   * signing-job-smallstep dials devsecops-demo-stepca.pki.svc.cluster.local,
+  #     which is absent from the step-ca TLS SANs (see stepCertificates.ca.dns
+  #     in values.yaml), so the TLS handshake is rejected.
+  #
+  # No demo depends on these Jobs — demos 2-6 sign from the host with cosign,
+  # which is authenticated by `az acr login`. Leaving them enabled only
+  # produces failing pods in the workload namespace. verify.sh reports checks
+  # 15 and 16 as [SKIP] when they are absent.
+  signing:
+    smallstep:
+      enabled: false
+    sigstore:
+      enabled: false
+  verification:
+    enabled: false
+
 # Disable NodePort-based host access — use kubectl port-forward or ingress instead
 hostAccess:
   enabled: false

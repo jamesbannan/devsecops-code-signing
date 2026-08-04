@@ -1,4 +1,4 @@
-{{- if .Values.workload.enabled }}
+{{- if and .Values.workload.enabled .Values.workload.verification.enabled }}
 ---
 # verification-job — verifies signatures on the demo image via both signing paths.
 #
