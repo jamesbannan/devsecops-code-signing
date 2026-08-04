@@ -48,6 +48,11 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get", "list"]
+  # The Smallstep signing Job also needs the provisioner password, which lives
+  # in this namespace as a Secret and must be mirrored into 'workload'.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -86,6 +91,9 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["configmaps"]
+    verbs: ["get", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
     verbs: ["get", "create", "update", "patch"]
 
 ---
@@ -189,5 +197,43 @@ spec:
                 --dry-run=client -o yaml | kubectl apply -f -
 
               echo "step-ca-root ConfigMap created/updated in namespace: $WORKLOAD_NS"
+
+              # -----------------------------------------------------------------
+              # Mirror the resources the Smallstep signing Job mounts.
+              #
+              # signing-job-smallstep runs in $WORKLOAD_NS but mounts the certs
+              # ConfigMap and the provisioner-password Secret, both of which the
+              # step-certificates sub-chart creates in $PKI_NS. A Pod can only
+              # mount from its own namespace, so without these copies the Job
+              # sits in Init:0/1 forever on FailedMount.
+              # -----------------------------------------------------------------
+              CERTS_CM="{{ .Release.Name }}-stepca-certs"
+              PROV_SECRET="{{ .Release.Name }}-stepca-provisioner-password"
+
+              INTERMEDIATE_CERT=$(kubectl get configmap "$CM_NAME" -n "$PKI_NS" \
+                -o jsonpath='{.data.intermediate_ca\.crt}')
+
+              kubectl create configmap "$CERTS_CM" \
+                --from-literal=root_ca.crt="$ROOT_CERT" \
+                --from-literal=intermediate_ca.crt="$INTERMEDIATE_CERT" \
+                -n "$WORKLOAD_NS" \
+                --dry-run=client -o yaml | kubectl apply -f -
+
+              echo "$CERTS_CM ConfigMap mirrored into namespace: $WORKLOAD_NS"
+
+              PROV_PASSWORD=$(kubectl get secret "$PROV_SECRET" -n "$PKI_NS" \
+                -o jsonpath='{.data.password}' | base64 -d)
+
+              if [ -z "$PROV_PASSWORD" ]; then
+                echo "ERROR: Could not read password from Secret $PROV_SECRET in $PKI_NS"
+                exit 1
+              fi
+
+              kubectl create secret generic "$PROV_SECRET" \
+                --from-literal=password="$PROV_PASSWORD" \
+                -n "$WORKLOAD_NS" \
+                --dry-run=client -o yaml | kubectl apply -f -
+
+              echo "$PROV_SECRET Secret mirrored into namespace: $WORKLOAD_NS"
               echo "Root CA propagation complete."
 {{- end }}
