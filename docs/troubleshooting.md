@@ -575,6 +575,64 @@ bash scripts/port-forward.sh   # or: bash scripts/resume.sh
 
 ---
 
+## 12. Demo 6 shows "No PolicyReports found in workload namespace"
+
+**Symptom:**
+
+Demo 6's audit-trail step — the closing "CISO report" — prints
+`No PolicyReports found in workload namespace` instead of the expected table,
+even though signed workloads are running and Kyverno is healthy.
+
+**Cause:**
+
+Kyverno's reports controller writes a PolicyReport once per resource and then
+tracks it by UID. If the PolicyReports are deleted out from under it (for
+example `kubectl delete policyreport -n workload --all` while debugging), the
+controller does **not** notice and will not recreate them. A `kubectl rollout
+restart` of the workload does not help either — the reports only reappear at the
+next full background scan, which defaults to one hour.
+
+Note that none of the demo or reset scripts delete PolicyReports.
+`scripts/reset-demo.sh` deliberately leaves them alone, and `scripts/cleanup.sh`
+removes the whole namespace (a fresh `install.sh` then regenerates everything).
+You only hit this by deleting them by hand.
+
+**Fix — force an immediate resync:**
+
+```bash
+kubectl rollout restart deployment/kyverno-reports-controller -n policy
+kubectl rollout status  deployment/kyverno-reports-controller -n policy --timeout=180s
+
+# Reports reappear within about 90 seconds
+kubectl get policyreport -n workload
+```
+
+**Related: `FAIL=1` on a correctly signed image**
+
+You may see a report row like `demo-app-signed ... PASS=1 FAIL=1` with the
+message `missing digest for <image>`. This is **not** a signature failure. The
+chart ships the policy with `validationFailureAction: Audit`, and Kyverno
+rejects `mutateDigest: true` unless the action is `Enforce`:
+
+```
+spec.rules[0].verifyImages[0].mutateDigest: Invalid value: true:
+mutateDigest must be set to false for 'Audit' failure action
+```
+
+With `mutateDigest: false` the reports controller has no resolved digest to
+record, so it logs `missing digest` even though the preceding log line reads
+`image attestors verification succeeded`. Demo 5 switches the policy to Enforce
+(where `mutateDigest: true` is permitted) and the same image verifies cleanly.
+Demo 6 now prints the failing messages and this explanation inline rather than
+leaving a bare `FAIL=1` on screen.
+
+Do **not** try to "fix" this by deploying the image by digest. Kyverno resolves
+cosign v3 OCI 1.1 referrer signatures only from a tagged reference; given a bare
+`repo@sha256:...` it reports `no signatures found` for an image that is in fact
+correctly signed.
+
+---
+
 ## AKS-Specific Issues
 
 ### A1. `terraform apply` fails: VM SKU not allowed in region

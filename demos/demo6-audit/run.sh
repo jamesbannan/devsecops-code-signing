@@ -43,6 +43,14 @@ else
   OIDC_ISSUER="https://kubernetes.default.svc"
 fi
 
+# The provenance chain must describe the build that actually happened, not a
+# hardcoded minikube one — on AKS the image is built locally and pushed to ACR.
+if [ "${CLUSTER_KIND:-}" = "aks" ]; then
+  BUILDER_DESC="docker buildx --platform linux/amd64 → push to ACR"
+else
+  BUILDER_DESC="minikube image build (containerd)"
+fi
+
 TMPDIR=$(mktemp -d /tmp/demo6-audit-XXXXXX)
 cleanup() { rm -rf "$TMPDIR"; }
 trap cleanup EXIT
@@ -292,6 +300,35 @@ if [ "$REPORT_COUNT" -gt 0 ]; then
   kubectl get policyreport -n workload --no-headers 2>/dev/null | head -10 | \
     awk '{printf "  %-40s %-6s PASS=%s FAIL=%s\n", $3, $2, $4, $5}'
   echo ""
+
+  # Explain any FAIL entries rather than leaving a bare count on screen.
+  #
+  # In Audit mode the policy runs with mutateDigest: false (Kyverno rejects
+  # mutateDigest: true unless validationFailureAction is Enforce), so the
+  # background reports controller has no digest to pin and records
+  # "missing digest for <image>". That is an artefact of Audit mode, NOT a
+  # signature failure — the same image verifies successfully in Demo 5 once
+  # the policy is switched to Enforce.
+  FAIL_MESSAGES=$(kubectl get policyreport -n workload \
+    -o jsonpath='{range .items[*].results[?(@.result=="fail")]}{.message}{"\n"}{end}' \
+    2>/dev/null | grep -v '^$' || true)
+
+  if [ -n "$FAIL_MESSAGES" ]; then
+    printf "  ${YELLOW}Failing entries:${NC}\n"
+    echo "$FAIL_MESSAGES" | sed 's/^/    • /'
+    echo ""
+    DIGEST_ONLY=$(echo "$FAIL_MESSAGES" | grep -v 'missing digest' || true)
+    if [ -z "$DIGEST_ONLY" ]; then
+      note "These are Audit-mode artefacts, not signature failures: with"
+      note "validationFailureAction: Audit the policy cannot rewrite the tag to a"
+      note "digest, so the reports controller has nothing to pin. Demo 5 switches"
+      note "the policy to Enforce and the same image verifies cleanly."
+    else
+      printf "  ${YELLOW}Genuine policy violations above — investigate before shipping.${NC}\n"
+    fi
+    echo ""
+  fi
+
   ok "$REPORT_COUNT PolicyReport entries in workload namespace"
   note "Each entry records: resource kind, policy name, result (pass/fail), message"
   note "Ship to Elastic, Splunk, or any SIEM via kubectl export or log forwarder"
@@ -328,7 +365,7 @@ printf "     Commit SHA: %s\n" "$GIT_SHA_FULL"
 echo ""
 printf "  ${CYAN}2. Build${NC}\n"
 printf "     Build time: %s\n" "$BUILD_TIME"
-printf "     Builder:    minikube image build (containerd)\n"
+printf "     Builder:    %s\n" "$BUILDER_DESC"
 echo ""
 printf "  ${CYAN}3. Image${NC}\n"
 printf "     Image:      %s\n" "$IMAGE"
