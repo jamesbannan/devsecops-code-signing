@@ -171,9 +171,27 @@ SIGN_OUTPUT=$(cosign sign \
   "$IMAGE" 2>&1) && SIGN_RC=0 || SIGN_RC=$?
 
 if [ "$SIGN_RC" -eq 0 ]; then
-  # Extract the tlog index from the output
-  TLOG_INDEX=$(echo "$SIGN_OUTPUT" | grep -o 'index: [0-9]*' | head -1 | awk '{print $2}')
-  echo "$SIGN_OUTPUT" | grep -E "tlog entry|SCT" | sed 's/^/  /'
+  # cosign v3 no longer prints "tlog entry created with index: N" on sign — the
+  # tlog index now lives in the signature bundle (verificationMaterial.tlogEntries).
+  # Read it from there, and never let a missing index abort the script under
+  # `set -euo pipefail` (a no-match grep used to kill the demo silently here).
+  TLOG_INDEX=$(cosign download signature --allow-insecure-registry "$IMAGE" 2>/dev/null | python3 -c "
+import sys, json
+idx = None
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        d = json.loads(line)
+    except Exception:
+        continue
+    for e in d.get('verificationMaterial', {}).get('tlogEntries', []):
+        li = e.get('logIndex')
+        if li is not None and (idx is None or int(li) > idx):
+            idx = int(li)
+print(idx if idx is not None else '')
+" 2>/dev/null) || TLOG_INDEX=""
   echo ""
   ok "Image signed keylessly (tlog index: ${TLOG_INDEX:-?})"
 
@@ -276,8 +294,10 @@ cmd "  --certificate-identity '$SA_IDENTITY' \\"
 cmd "  --certificate-oidc-issuer '$OIDC_ISSUER' \\"
 cmd "  --allow-insecure-registry $IMAGE"
 
+# cosign v3 stores the Rekor inclusion proof inside the signature bundle, so
+# verification confirms tlog existence offline — no --rekor-url needed. Passing
+# it now only prints a deprecation warning ("please use --bundle").
 VERIFY_OUTPUT=$(cosign verify \
-  --rekor-url "$REKOR_URL" \
   --certificate-identity "$SA_IDENTITY" \
   --certificate-oidc-issuer "$OIDC_ISSUER" \
   --allow-insecure-registry \

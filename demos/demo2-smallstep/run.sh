@@ -273,7 +273,7 @@ INTER_DER_B64=$(openssl x509 -in "$TMPDIR/intermediate_ca.crt" -outform DER 2>/d
 
 # Fetch the Rekor transparency log public key from the local TUF mirror
 note "Fetching Rekor public key from TUF mirror ..."
-REKOR_KEY_FILE=$(curl -sf "$TUF_URL/targets/" | grep -o '[a-f0-9]*\.rekor\.pub' | head -1)
+REKOR_KEY_FILE=$(curl -sf "$TUF_URL/targets/" | grep -o '[a-f0-9]*\.rekor\.pub' | head -1 || true)
 curl -sf "${TUF_URL}/targets/${REKOR_KEY_FILE}" > "$TMPDIR/rekor.pub"
 REKOR_KEY_DER_B64=$(openssl ec -pubin -in "$TMPDIR/rekor.pub" -outform DER 2>/dev/null | base64 | tr -d '\n')
 REKOR_LOG_ID_B64=$(openssl ec -pubin -in "$TMPDIR/rekor.pub" -outform DER 2>/dev/null | openssl dgst -sha256 -binary | base64 | tr -d '\n')

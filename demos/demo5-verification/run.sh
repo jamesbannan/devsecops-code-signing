@@ -193,7 +193,9 @@ SIGN_OUTPUT=$(cosign sign \
   "$IMAGE" 2>&1) && SIGN_RC=0 || SIGN_RC=$?
 
 if [ "$SIGN_RC" -eq 0 ]; then
-  echo "$SIGN_OUTPUT" | grep -E "tlog|entry|SCT" | head -3 | sed 's/^/  /'
+  # cosign v3 no longer emits tlog/SCT lines on sign; guard the grep so a
+  # no-match doesn't abort the demo under `set -euo pipefail`.
+  echo "$SIGN_OUTPUT" | grep -E "Signing|Pushing|tlog|entry|SCT" | head -3 | sed 's/^/  /' || true
   ok "Image signed (legacy bundle format for Kyverno compatibility)"
 else
   echo "$SIGN_OUTPUT" | tail -5 | sed 's/^/  /'
@@ -271,7 +273,7 @@ OUTPUT=$(kubectl run unsigned-test -n workload \
 
 if echo "$OUTPUT" | grep -qiE "blocked|admission webhook|policy|denied|Error"; then
   printf "\n  ${RED}${BOLD}✗ BLOCKED${NC} — Kyverno rejected the unsigned image!\n"
-  echo "$OUTPUT" | grep -oE "failed to verify image[^']*" | head -1 | sed 's/^/    /'
+  echo "$OUTPUT" | grep -oE "failed to verify image[^']*" | head -1 | sed 's/^/    /' || true
   echo ""
   blocked "Image demo/unsigned:latest has no cosign signature"
 else

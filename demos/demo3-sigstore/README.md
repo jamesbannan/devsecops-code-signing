@@ -92,7 +92,6 @@ cosign download signature --allow-insecure-registry \
 ```bash
 ISSUER=${AKS_OIDC_ISSUER_URL:-https://kubernetes.default.svc}
 cosign verify \
-  --rekor-url "${REKOR_URL:-http://localhost:30300}" \
   --certificate-identity "https://kubernetes.io/namespaces/workload/serviceaccounts/signing-sa" \
   --certificate-oidc-issuer "$ISSUER" \
   --allow-insecure-registry \
@@ -154,6 +153,12 @@ Common surprises:
   re-run demo 3.
 - Cosign 2.x output → `cosign tree` shows `via tag:` lines instead of
   `via OCI referrer`. Demos target cosign v3+.
+- Script exits silently right after `cosign sign` with no `[OK]`/`[FAIL]` →
+  cosign v3 dropped the `tlog entry created with index: N` line, so the old
+  output parsing aborted the script under `set -euo pipefail`. The demos now
+  read the tlog index from the signature bundle
+  (`verificationMaterial.tlogEntries[].logIndex`). See
+  [troubleshooting.md §9](../../docs/troubleshooting.md).
 
 ### Why no `.sig` tag any more?
 

@@ -256,7 +256,9 @@ SMALLSTEP_SIGN=$(COSIGN_PASSWORD="" cosign sign \
   "$IMAGE" 2>&1) && SS_RC=0 || SS_RC=$?
 
 if [ "$SS_RC" -eq 0 ]; then
-  echo "$SMALLSTEP_SIGN" | grep -E "tlog|entry|Pushing" | head -3 | sed 's/^/  /'
+  # cosign v3 progress output is "Signing artifact... / Pushing signature to:";
+  # `|| true` keeps a no-match grep from aborting the demo under `set -euo pipefail`.
+  echo "$SMALLSTEP_SIGN" | grep -E "Signing|Pushing|tlog|entry" | head -3 | sed 's/^/  /' || true
   step_end "Smallstep signing complete (cert expires in 5 minutes)"
 else
   echo "$SMALLSTEP_SIGN" | tail -3 | sed 's/^/  /'
@@ -286,7 +288,9 @@ SIGN_OUTPUT=$(cosign sign \
   "$IMAGE" 2>&1) && SIGN_RC=0 || SIGN_RC=$?
 
 if [ "$SIGN_RC" -eq 0 ]; then
-  echo "$SIGN_OUTPUT" | grep -E "tlog|entry|SCT" | head -3 | sed 's/^/  /'
+  # cosign v3 no longer emits tlog/SCT lines on sign; guard the grep so a
+  # no-match doesn't abort the demo under `set -euo pipefail`.
+  echo "$SIGN_OUTPUT" | grep -E "Signing|Pushing|tlog|entry|SCT" | head -3 | sed 's/^/  /' || true
   step_end "Sigstore keyless signing complete"
 else
   echo "$SIGN_OUTPUT" | tail -3 | sed 's/^/  /'
@@ -314,8 +318,10 @@ fi
 cmd "cosign verify --certificate-identity '$SA_IDENTITY' \\"
 cmd "  --certificate-oidc-issuer '$OIDC_ISSUER' $IMAGE"
 
+# cosign v3 embeds the Rekor inclusion proof in the signature bundle, so tlog
+# existence is verified offline — no --rekor-url needed (it now only prints a
+# deprecation warning, "please use --bundle").
 VERIFY_OUTPUT=$(cosign verify \
-  --rekor-url "$REKOR_URL" \
   --certificate-identity "$SA_IDENTITY" \
   --certificate-oidc-issuer "$OIDC_ISSUER" \
   --allow-insecure-registry \

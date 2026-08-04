@@ -73,7 +73,6 @@ curl -s "${REKOR_URL:-http://localhost:30300}/api/v1/log" | jq .treeSize
 ```bash
 ISSUER=${AKS_OIDC_ISSUER_URL:-https://kubernetes.default.svc}
 cosign verify \
-  --rekor-url "${REKOR_URL:-http://localhost:30300}" \
   --certificate-identity "https://kubernetes.io/namespaces/workload/serviceaccounts/signing-sa" \
   --certificate-oidc-issuer "$ISSUER" \
   --allow-insecure-registry --insecure-ignore-sct=true \
