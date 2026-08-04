@@ -10,7 +10,11 @@
 # =============================================================================
 
 # --- Stage 1: Build ---
-FROM golang:1.22-alpine AS builder
+# Pinned to the *build* platform so the Go toolchain always runs natively.
+# Emulating an amd64 Go compiler on an arm64 host (QEMU) crashes with
+# "runtime: lfstack.push invalid packing". CGO_ENABLED=0 means cross-compiling
+# via GOARCH is pure Go and completely reliable.
+FROM --platform=$BUILDPLATFORM golang:1.22-alpine AS builder
 
 WORKDIR /app
 
@@ -22,7 +26,12 @@ COPY main.go .
 ARG GIT_SHA=unknown
 ARG BUILD_TIME=unknown
 
-RUN CGO_ENABLED=0 GOOS=linux go build \
+# Populated automatically by the builder from --platform; defaults keep plain
+# `docker build` (no --platform) working.
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
     -ldflags="-s -w -X main.gitSHA=${GIT_SHA} -X main.buildTime=${BUILD_TIME}" \
     -o demo-app \
     .
