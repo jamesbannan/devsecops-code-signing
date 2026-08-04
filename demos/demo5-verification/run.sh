@@ -179,18 +179,55 @@ narrate "Kyverno v1.15 requires the legacy cosign signature format."
 narrate "We re-sign the image with --new-bundle-format=false for compatibility."
 echo ""
 
-TOKEN=$(kubectl create token signing-sa -n workload --audience=sigstore --duration=10m)
 cmd "cosign sign --new-bundle-format=false --fulcio-url ... --rekor-url ... $IMAGE"
 
-SIGN_OUTPUT=$(cosign sign \
-  --fulcio-url "$FULCIO_URL" \
-  --rekor-url "$REKOR_URL" \
-  --identity-token "$TOKEN" \
-  --allow-insecure-registry \
-  --use-signing-config=false \
-  --new-bundle-format=false \
-  --yes \
-  "$IMAGE" 2>&1) && SIGN_RC=0 || SIGN_RC=$?
+# Signing talks to Fulcio and Rekor over port-forwards. Those drop
+# occasionally — a pod restart, conference wifi, a laptop waking up — and
+# scripts/port-forward.sh restarts them within a couple of seconds. A
+# single-shot sign that lands in that window kills the demo outright, so wait
+# for both endpoints and retry rather than failing on a transient blip.
+wait_for_endpoint() {
+  local url="$1" name="$2" i
+  for i in $(seq 1 10); do
+    if curl -sf --max-time 3 "$url" >/dev/null 2>&1; then
+      [ "$i" -gt 1 ] && printf "  ${YELLOW}%s is back.${NC}\n" "$name"
+      return 0
+    fi
+    [ "$i" -eq 1 ] && printf "  ${YELLOW}Waiting for %s to become reachable ...${NC}\n" "$name"
+    sleep 2
+  done
+  return 1
+}
+
+SIGN_ATTEMPTS="${SIGN_RETRIES:-3}"
+sign_attempt=1
+while :; do
+  wait_for_endpoint "$FULCIO_URL/healthz" "Fulcio" || true
+  wait_for_endpoint "$REKOR_URL/api/v1/log" "Rekor" || true
+
+  # Mint the token per attempt: a retry after a long wait must not reuse one
+  # that is close to expiry.
+  TOKEN=$(kubectl create token signing-sa -n workload --audience=sigstore --duration=10m)
+
+  SIGN_OUTPUT=$(cosign sign \
+    --fulcio-url "$FULCIO_URL" \
+    --rekor-url "$REKOR_URL" \
+    --identity-token "$TOKEN" \
+    --allow-insecure-registry \
+    --use-signing-config=false \
+    --new-bundle-format=false \
+    --yes \
+    "$IMAGE" 2>&1) && SIGN_RC=0 || SIGN_RC=$?
+
+  if [ "$SIGN_RC" -eq 0 ] || [ "$sign_attempt" -ge "$SIGN_ATTEMPTS" ]; then
+    break
+  fi
+
+  printf "  ${YELLOW}Signing attempt %s/%s failed (likely a dropped port-forward) — retrying ...${NC}\n" \
+    "$sign_attempt" "$SIGN_ATTEMPTS"
+  sign_attempt=$((sign_attempt + 1))
+  sleep 3
+done
 
 if [ "$SIGN_RC" -eq 0 ]; then
   # cosign v3 no longer emits tlog/SCT lines on sign; guard the grep so a
