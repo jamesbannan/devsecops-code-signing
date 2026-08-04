@@ -1,6 +1,6 @@
 # Demo Scripts
 
-Six end-to-end demonstrations for the BSides Melbourne 2026 talk:
+Six end-to-end demonstrations for the talk
 **"Zero-Friction DevSecOps: Automated Code Signing Done Right"**
 
 ## Prerequisites
@@ -125,6 +125,23 @@ Most defaults are auto-detected by `scripts/_cluster-detect.sh` based on the cur
 | `STEP_CA_URL` | `https://localhost:39000` | (port-forwarded) | Smallstep CA |
 | `AKS_OIDC_ISSUER_URL` | _(unset)_ | `https://<region>.oic.prod-aks.azure.com/<tenant>/<cluster>/` | Used by demos 3/4/5/6 for `--certificate-oidc-issuer` on AKS |
 
+## Presentation web UIs
+
+Two optional browser UIs are wired into the chart for live demos (toggle with
+`registryUi.enabled` / `rekorUi.enabled`, both `true` by default). Reach them via
+`scripts/port-forward.sh` (minikube) or `kubectl port-forward` (AKS):
+
+| UI | URL (minikube) | What it shows |
+|----|----------------|---------------|
+| **Registry browser** ([joxit](https://github.com/Joxit/docker-registry-ui)) | <http://localhost:30800> | `demo/app` repositories, tags, digests, referrers |
+| **Rekor Search UI** ([sigstore](https://github.com/sigstore/rekor-search-ui)) | <http://localhost:30900> | Search the private transparency log by hash / identity |
+
+The Registry UI uses a public image (no build needed). The Rekor UI is a
+self-contained custom image that `scripts/install.sh` builds and pushes for you;
+re-run `bash demos/rekor-ui/build-and-push.sh` only to rebuild it (see
+[`demos/rekor-ui/README.md`](rekor-ui/README.md)).
+Both run same-origin proxies, so neither the registry nor Rekor needs CORS config.
+
 ## Presenter Tips
 
 - **Increase font size** before presenting — the audience needs to read the terminal
@@ -133,6 +150,7 @@ Most defaults are auto-detected by `scripts/_cluster-detect.sh` based on the cur
 - **Have the port-forwards running** — `bash scripts/port-forward.sh`
 - **Keep each demo < 10 minutes** — audience attention peaks for shorter segments
 - **For Demo 5**, the Kyverno enforcement takes 5–10 seconds to propagate after patching — build in a pause
+- **To re-run the demos from scratch** (e.g. between rehearsals), run `bash scripts/reset-demo.sh`. It wipes the `workload` Jobs/pods, redeploys them, and resets the Kyverno `require-image-signature` policy that Demo 5 patches (back to `Audit` / `mutateDigest: false`) — all without tearing down the core PKI, so it's far faster than a full reinstall. The redeploy restarts step-ca (via its config hook), so `reset-demo.sh` also re-establishes the local port-forwards automatically; if `localhost:39000` ever goes dark outside a reset, run `bash scripts/port-forward.sh` (or `resume.sh`).
 - **On AKS**: ACR access tokens expire after ~3 hours. Re-run `az acr login -n <acr>` if `docker push` starts returning 401. Run `bash scripts/aks-down.sh` between sessions to avoid idle cluster cost.
 
 ## Troubleshooting

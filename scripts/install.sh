@@ -6,9 +6,12 @@
 # 2. helm dependency update
 # 3. helm upgrade --install (no --wait; manual readiness checks follow)
 # 4. Wait for core Deployments/StatefulSets to become Ready
-# 4. Launch port-forwards
-# 5. Initialize cosign TUF root against local mirror
-# 6. Print endpoint summary
+# 5. Apply Kyverno ClusterPolicy
+# 6. Sweep failed Job-retry pods left behind in infra namespaces
+# 7. Build & push the chart-managed Rekor Search UI image (best-effort)
+# 8. Launch port-forwards
+# 9. Initialize cosign TUF root against local mirror
+# 10. Print endpoint summary
 # =============================================================================
 set -euo pipefail
 
@@ -286,14 +289,76 @@ if ! helm "${HELM_POLICY_ARGS[@]}"; then
 fi
 ok "ClusterPolicy require-image-signature applied"
 
+# ---------------------------------------------------------------------------
+# Sweep failed Job-retry pods left behind in infra namespaces
+# ---------------------------------------------------------------------------
+# Several scaffold sub-charts run bootstrap Jobs (notably trillian-createdb)
+# that retry until their backing service is ready. The early attempts linger in
+# Error (status.phase=Failed) state — harmless history, but noisy and alarming
+# in `kubectl get pods`. Now that all core infrastructure is Ready, delete those
+# terminal Failed pods. Succeeded ("Completed") pods are left intact, and the
+# 'workload' namespace is intentionally excluded: its signing/verification Jobs
+# are *expected* to fail until the demo image is built (build-and-push.sh).
+header "Cleaning up failed Job pods"
+INFRA_NAMESPACES="pki registry policy fulcio-system rekor-system tuf-system trillian-system ctlog-system"
+SWEPT=0
+for ns in $INFRA_NAMESPACES; do
+  # `kubectl delete -o name` prints one line per pod it actually removed, so we
+  # count real deletions (an admission webhook block would log to stderr and
+  # leave stdout empty → counted as zero, not a false success).
+  deleted=$(kubectl delete pod -n "$ns" --field-selector=status.phase=Failed \
+    --ignore-not-found -o name 2>/dev/null | grep -c . || true)
+  if [ "${deleted:-0}" -gt 0 ]; then
+    info "Removed $deleted failed pod(s) in $ns"
+    SWEPT=$((SWEPT + deleted))
+  fi
+done
+if [ "$SWEPT" -gt 0 ]; then
+  ok "Swept $SWEPT failed Job-retry pod(s)"
+else
+  ok "No failed Job-retry pods to clean up"
+fi
+
 # =============================================================================
-# Step 4: Port-forwards
+# Step 4: Build & push the Rekor Search UI image
 # =============================================================================
+# The rekor-ui presentation UI is a chart-managed component (enabled by default)
+# served from a *custom* image. Unlike the registry UI — which runs an upstream
+# image and works out of the box — rekor-ui's image must be built and pushed to
+# the demo registry, or the pod sits in ImagePullBackOff forever. Build it BEFORE
+# the port-forwards: a port-forward to a Service whose pod is still Pending (no
+# image) dies immediately, so the UI would never be reachable. Best-effort: a
+# build failure warns and points at the manual command, but does not abort.
+# (On minikube the build pushes via the registry ClusterIP and on AKS via ACR —
+# neither needs a port-forward, so building first is safe.)
+REKOR_UI_BUILT=0
+if kubectl get deploy rekor-ui -n registry &>/dev/null; then
+  header "Building the Rekor Search UI image"
+  info "This builds a static Next.js export + nginx proxy and may take a few minutes ..."
+  if bash "$SCRIPT_DIR/../demos/rekor-ui/build-and-push.sh"; then
+    REKOR_UI_BUILT=1
+    ok "Rekor Search UI image built, pushed, and deployment rolled"
+  else
+    printf "  ${YELLOW}[WARN]${NC} rekor-ui image build failed. The Rekor Search UI will\n"
+    printf "  stay in ImagePullBackOff until you build it manually:\n"
+    printf "    ${CYAN}bash demos/rekor-ui/build-and-push.sh${NC}\n"
+  fi
+else
+  info "rekor-ui deployment not found (disabled in values) — skipping UI image build"
+fi
+
+# =============================================================================
+# Step 5: Port-forwards
+# =============================================================================
+# Runs after the rekor-ui build so every enabled Service has a ready pod. The pf
+# helper additionally waits for ready endpoints before attaching (see
+# port-forward.sh), closing the race where the freshly-rolled rekor-ui pod is
+# still starting.
 header "Starting port-forwards"
 bash "$SCRIPT_DIR/port-forward.sh"
 
 # =============================================================================
-# Step 5: Initialize cosign TUF root
+# Step 6: Initialize cosign TUF root
 # =============================================================================
 header "Initializing cosign TUF trust root"
 
@@ -318,7 +383,7 @@ cosign initialize --mirror "$TUF_URL" --root "$TUF_URL/root.json" || {
 }
 
 # =============================================================================
-# Step 6: Endpoint summary
+# Step 7: Endpoint summary
 # =============================================================================
 header "Endpoint summary"
 printf "\n"
@@ -334,6 +399,17 @@ printf "  %-20s %-40s %s\n" "Rekor" "http://localhost:30300" "rekor-server.rekor
 printf "  %-20s %-40s %s\n" "Fulcio" "http://localhost:30200" "fulcio-server.fulcio-system.svc:80"
 printf "  %-20s %-40s %s\n" "TUF mirror" "http://localhost:30100" "tuf-server.tuf-system.svc:80"
 printf "  %-20s %-40s %s\n" "step-ca" "https://localhost:39000" "step-ca.pki.svc:9000"
+printf "  %-20s %-40s %s\n" "Registry UI" "http://localhost:30800" "registry-ui.registry.svc:80"
+if [ "$REKOR_UI_BUILT" -eq 1 ]; then
+  printf "  %-20s %-40s %s\n" "Rekor Search UI" "http://localhost:30900" "rekor-ui.registry.svc:8080"
+else
+  printf "  %-20s %-40s %s\n" "Rekor Search UI" "http://localhost:30900 (image not built)" "rekor-ui.registry.svc:8080"
+fi
+printf "\n"
+printf "  ${YELLOW}Web UIs (for presentations) need port-forwards: bash scripts/port-forward.sh${NC}\n"
+if [ "$REKOR_UI_BUILT" -ne 1 ]; then
+  printf "  ${YELLOW}The Rekor Search UI image is missing — build it: bash demos/rekor-ui/build-and-push.sh${NC}\n"
+fi
 printf "\n"
 
 ok "Installation complete!"

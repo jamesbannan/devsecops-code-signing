@@ -1,0 +1,33 @@
+# =============================================================================
+# nginx.conf.template — served as /etc/nginx/conf.d/default.conf
+# =============================================================================
+# The stock nginx image entrypoint runs envsubst over this template, replacing
+# ${REKOR_UPSTREAM} (an env var) at container start. nginx runtime variables
+# such as $host / $uri are NOT env vars, so they are left untouched.
+# =============================================================================
+
+server {
+    listen      8080;
+    server_name _;
+
+    root  /usr/share/nginx/html;
+    index index.html;
+
+    # --- Same-origin Rekor API proxy ---------------------------------------
+    # The UI is built with NEXT_PUBLIC_REKOR_DEFAULT_DOMAIN=/rekor, so the
+    # browser requests /rekor/api/v1/...  The trailing slash on proxy_pass
+    # strips the /rekor/ prefix, forwarding /api/v1/... to the rekor-server.
+    location /rekor/ {
+        proxy_pass         http://${REKOR_UPSTREAM}/;
+        proxy_http_version 1.1;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+    }
+
+    # --- Static UI (Next.js export) ----------------------------------------
+    location / {
+        try_files $uri $uri.html $uri/ /index.html;
+    }
+}

@@ -86,6 +86,80 @@ registry:
       memory: 256Mi
 
 # =============================================================================
+# Registry browser UI — joxit/docker-registry-ui (public upstream image)
+# =============================================================================
+# A web UI for browsing the demo registry's repositories, tags, and digests —
+# handy in a live presentation. Runs in "single registry / proxy" mode: its own
+# nginx proxies /v2/ to the in-cluster registry, so the browser only talks to
+# this UI's origin and the registry itself needs no CORS configuration.
+# Deployed into the 'registry' namespace. Reached at localhost:30800 (local) via
+# scripts/port-forward.sh; ClusterIP on cloud (overlay in values-aks.yaml).
+# =============================================================================
+registryUi:
+  enabled: true
+
+  image:
+    repository: joxit/docker-registry-ui
+    tag: "2.5.7"
+    pullPolicy: IfNotPresent
+
+  title: "DevSecOps Demo Registry"
+  # Allow tag deletion from the UI (demo registry only — never expose publicly).
+  deleteImages: true
+
+  service:
+    # NodePort for local minikube access; ClusterIP in cloud overlays.
+    type: NodePort
+    port: 80
+    nodePort: 30800
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+# =============================================================================
+# Rekor Search UI — self-contained custom image (demos/rekor-ui/)
+# =============================================================================
+# A web UI for searching the private Rekor transparency log. Upstream ships no
+# container image and Rekor emits no CORS headers, so we build our own (Next.js
+# static export + nginx). The image is built/pushed by demos/rekor-ui/build-and-push.sh
+# (like demo-app). Its nginx same-origin-proxies /rekor/ to the in-cluster
+# rekor-server, so no CORS is required.
+# Deployed into the 'registry' namespace. Reached at localhost:30900 (local) via
+# scripts/port-forward.sh; ClusterIP on cloud (overlay in values-aks.yaml).
+# =============================================================================
+rekorUi:
+  enabled: true
+
+  image:
+    # Empty repository → defaults to "<global.registry>/demo/rekor-ui".
+    # Override in values-aks.yaml (or here) to pin a specific registry path.
+    repository: ""
+    tag: latest
+    pullPolicy: IfNotPresent
+
+  # In-cluster rekor-server endpoint the UI's nginx proxies to.
+  rekorUpstream: "rekor-server.rekor-system.svc.cluster.local:80"
+
+  service:
+    # NodePort for local minikube access; ClusterIP in cloud overlays.
+    type: NodePort
+    port: 8080
+    nodePort: 30900
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+# =============================================================================
 # Sigstore — condition flag for scaffold sub-chart dependency
 # =============================================================================
 sigstore:

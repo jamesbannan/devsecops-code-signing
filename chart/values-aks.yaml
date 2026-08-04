@@ -32,6 +32,24 @@ registry:
     storageClassName: "managed-csi"
     size: 5Gi
 
+# Demo UIs: ClusterIP on AKS (service type auto-switches via global.environment,
+# these blocks are explicit for clarity). Reach them with kubectl port-forward:
+#   kubectl port-forward svc/registry-ui 30800:80   -n registry
+#   kubectl port-forward svc/rekor-ui    30900:8080 -n registry
+# registry-ui uses the public joxit image (no build needed). rekor-ui is the
+# custom image built by demos/rekor-ui/build-and-push.sh; its repository defaults
+# to "<global.registry>/demo/rekor-ui", i.e. your ACR — no override needed below.
+registryUi:
+  service:
+    type: ClusterIP
+rekorUi:
+  service:
+    type: ClusterIP
+  # image.repository defaults to "<global.registry>/demo/rekor-ui" (your ACR).
+  # Uncomment to pin an explicit path:
+  # image:
+  #   repository: "<YOUR_ACR_NAME>.azurecr.io/demo/rekor-ui"
+
 # Sigstore OIDC issuer for AKS — update to your cluster's OIDC issuer URL.
 # The Sigstore Scaffolding Fulcio sub-chart consumes the full config blob via
 # `.config.contents`. We override it here to add the AKS-managed OIDC issuer

@@ -42,6 +42,8 @@ printf "  Rekor:    %s\n" "$REKOR_URL"
 printf "  Fulcio:   %s\n" "$FULCIO_URL"
 printf "  TUF:      %s\n" "$TUF_URL"
 printf "  step-ca:  %s\n" "$STEP_CA_URL"
+printf "  Reg UI:   %s\n" "${REGISTRY_UI_URL:-http://localhost:30800}"
+printf "  Rekor UI: %s\n" "${REKOR_UI_URL:-http://localhost:30900}"
 printf "  Image:    %s\n" "$IMAGE"
 
 # =============================================================================
@@ -76,6 +78,19 @@ if [ -n "$MISSING_NS" ]; then
 fi
 
 printf "  ${GREEN}[OK]${NC} Cluster reachable and install.sh appears to have run.\n"
+
+# Port-forward health hint: every host-side check below relies on the
+# port-forwards from scripts/port-forward.sh. If those are down (laptop sleep,
+# closed terminal, a stray kill) while the backing pods are still healthy, the
+# checks fail with confusing empty values (e.g. "Registry /v2/ returned: ''").
+# Detect that specific state and point at the fix up-front, before the noise.
+if ! curl -sf "http://${REGISTRY}/v2/" -o /dev/null 2>/dev/null \
+   && kubectl get deploy registry -n registry \
+        -o jsonpath='{.status.readyReplicas}' 2>/dev/null | grep -q '^[1-9]'; then
+  printf "  ${YELLOW}[HINT]${NC} %s is unreachable but the registry pod is Ready —\n" "$REGISTRY"
+  printf "         your port-forwards are probably down. Restart them, then re-run verify.sh:\n"
+  printf "           ${CYAN}bash scripts/port-forward.sh${NC}  ${YELLOW}(or scripts/resume.sh after a laptop sleep)${NC}\n"
+fi
 
 # =============================================================================
 # Check 1: All expected namespaces exist and are Active

@@ -1,0 +1,26 @@
+{{- if .Values.rekorUi.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rekor-ui
+  namespace: {{ include "devsecops-demo.registryNamespace" . }}
+  labels:
+    {{- include "devsecops-demo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: rekor-ui
+spec:
+  # NodePort in local/minikube mode (reachable at localhost:30900 via
+  # scripts/port-forward.sh); ClusterIP in cloud environments.
+  type: {{ if eq .Values.global.environment "local" }}NodePort{{ else }}ClusterIP{{ end }}
+  selector:
+    app.kubernetes.io/name: rekor-ui
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: http
+      protocol: TCP
+      port: {{ .Values.rekorUi.service.port | default 8080 }}
+      targetPort: http
+      {{- if eq .Values.global.environment "local" }}
+      nodePort: {{ .Values.rekorUi.service.nodePort | default 30900 }}
+      {{- end }}
+{{- end }}

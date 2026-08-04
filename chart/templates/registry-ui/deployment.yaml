@@ -1,0 +1,65 @@
+{{- if .Values.registryUi.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: registry-ui
+  namespace: {{ include "devsecops-demo.registryNamespace" . }}
+  labels:
+    {{- include "devsecops-demo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: registry-ui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: registry-ui
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: registry-ui
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: registry-ui
+    spec:
+      containers:
+        - name: registry-ui
+          image: "{{ .Values.registryUi.image.repository }}:{{ .Values.registryUi.image.tag }}"
+          imagePullPolicy: {{ .Values.registryUi.image.pullPolicy | default "IfNotPresent" }}
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+          env:
+            # Single-registry (proxy) mode: the UI's own nginx proxies /v2/ to
+            # the in-cluster registry, so the browser only talks to this origin
+            # and the registry needs no CORS config.
+            - name: SINGLE_REGISTRY
+              value: "true"
+            - name: NGINX_PROXY_PASS_URL
+              value: "http://{{ include "devsecops-demo.registryServiceDNS" . }}"
+            - name: REGISTRY_TITLE
+              value: {{ .Values.registryUi.title | quote }}
+            # docker pull hints shown in the UI point at the host-facing registry.
+            - name: PULL_URL
+              value: {{ .Values.global.registry | quote }}
+            - name: DELETE_IMAGES
+              value: {{ .Values.registryUi.deleteImages | quote }}
+            - name: SHOW_CONTENT_DIGEST
+              value: "true"
+            - name: SHOW_CATALOG_NB_TAGS
+              value: "true"
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            {{- toYaml .Values.registryUi.resources | nindent 12 }}
+{{- end }}

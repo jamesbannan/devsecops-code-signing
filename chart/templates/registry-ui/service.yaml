@@ -1,0 +1,26 @@
+{{- if .Values.registryUi.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: registry-ui
+  namespace: {{ include "devsecops-demo.registryNamespace" . }}
+  labels:
+    {{- include "devsecops-demo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: registry-ui
+spec:
+  # NodePort in local/minikube mode (reachable at localhost:30800 via
+  # scripts/port-forward.sh); ClusterIP in cloud environments.
+  type: {{ if eq .Values.global.environment "local" }}NodePort{{ else }}ClusterIP{{ end }}
+  selector:
+    app.kubernetes.io/name: registry-ui
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: http
+      protocol: TCP
+      port: {{ .Values.registryUi.service.port | default 80 }}
+      targetPort: http
+      {{- if eq .Values.global.environment "local" }}
+      nodePort: {{ .Values.registryUi.service.nodePort | default 30800 }}
+      {{- end }}
+{{- end }}

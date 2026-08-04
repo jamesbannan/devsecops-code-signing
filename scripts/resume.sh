@@ -55,6 +55,8 @@ ENDPOINTS=(
   "Fulcio|http://localhost:30200/|404"
   "TUF mirror|http://localhost:30100/timestamp.json|200"
   "step-ca|https://localhost:39000/health|200"
+  "Registry UI|http://localhost:30800/|200"
+  "Rekor Search UI|http://localhost:30900/|200"
 )
 
 # -----------------------------------------------------------------------------
@@ -123,7 +125,7 @@ fi
 # 2b. Best-effort scan: any leftover `kubectl port-forward` we don't know about.
 # Uses ps + grep so we don't depend on pgrep (not present on minimal images).
 # Filter to our well-known local ports to avoid clobbering unrelated forwards.
-WELL_KNOWN_PORTS="30500 30300 30200 30100 39000"
+WELL_KNOWN_PORTS="30500 30300 30200 30100 39000 30800 30900"
 while IFS= read -r line; do
   pid=$(awk '{print $1}' <<<"$line")
   [ -z "$pid" ] && continue

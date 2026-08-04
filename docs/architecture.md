@@ -125,6 +125,16 @@ A minimal Go HTTP server (`main.go`) that returns its build metadata as JSON:
 
 The `signed` field reflects the `IMAGE_SIGNED=true` environment variable, so signed and unsigned deployments are visually distinguishable.
 
+### Presentation Web UIs
+**Namespace:** `registry` (toggle with `registryUi.enabled` / `rekorUi.enabled`)
+
+Two optional browser UIs make the demo legible to an audience:
+
+- **Registry browser** — [`joxit/docker-registry-ui`](https://github.com/Joxit/docker-registry-ui) (public image), run in *single-registry proxy* mode: its own nginx proxies `/v2/` to the in-cluster registry (`NGINX_PROXY_PASS_URL`), so the browser only talks to the UI's origin and the registry needs no CORS config. Browse repositories, tags, digests, and signature/attestation referrers.
+- **Rekor Search UI** — a self-contained build of [`sigstore/rekor-search-ui`](https://github.com/sigstore/rekor-search-ui) (custom image in [`demos/rekor-ui/`](../demos/rekor-ui/README.md); upstream ships no container image). It bakes `NEXT_PUBLIC_REKOR_DEFAULT_DOMAIN=/rekor` — a **relative** base — so the browser calls `/rekor/api/v1/...` against the UI's own origin, and the bundled nginx reverse-proxies that to the in-cluster `rekor-server`. This sidesteps the fact that `rekor-server` emits no CORS headers, and keeps the image portable across minikube and AKS (nothing is pinned to a host). `scripts/install.sh` builds and pushes this image automatically; re-run `bash demos/rekor-ui/build-and-push.sh` only to rebuild it.
+
+Both are `NodePort` locally (`localhost:30800` / `localhost:30900` via `scripts/port-forward.sh`) and `ClusterIP` on AKS (`kubectl port-forward`).
+
 ---
 
 ## Data Flow: Smallstep Signing Path
@@ -187,7 +197,7 @@ The `signed` field reflects the `IMAGE_SIGNED=true` environment variable, so sig
            └─ cosign discards ephemeral private key (never persisted)
 ```
 
-**Verification:** `cosign verify --rekor-url ... --certificate-identity ... --certificate-oidc-issuer ...` validates the Rekor log entry, cert chain via TUF roots, and the identity claims in the certificate.
+**Verification:** `cosign verify --certificate-identity ... --certificate-oidc-issuer ...` validates the Rekor log entry, cert chain via TUF roots, and the identity claims in the certificate. Under cosign v3 the Rekor inclusion proof is embedded in the signature bundle, so tlog existence is verified **offline** — `--rekor-url` is no longer needed on verify (it is deprecated in favour of `--bundle`).
 
 ---
 
@@ -215,6 +225,8 @@ The two paths are **complementary, not competing**. Many enterprises run private
 | Fulcio | fulcio-system | `fulcio-server.fulcio-system.svc:80` | `localhost:30200` | `kubectl port-forward` |
 | TUF mirror | tuf-system | `tuf.tuf-system.svc:80` | `localhost:30100` | `kubectl port-forward` |
 | step-ca | pki | `step-ca.pki.svc:9000` | `localhost:39000` | `kubectl port-forward` |
+| Registry UI | registry | `registry-ui.registry.svc:80` | `localhost:30800` | `kubectl port-forward` (via `scripts/port-forward.sh`) |
+| Rekor Search UI | registry | `rekor-ui.registry.svc:8080` | `localhost:30900` | `kubectl port-forward` (via `scripts/port-forward.sh`) |
 | Azure Container Registry | _(external)_ | n/a | n/a | `<acr>.azurecr.io` (managed by `aks-up.sh`, AcrPull on AKS UAMI) |
 
 ---

@@ -11,6 +11,8 @@
 #   localhost:30200 → fulcio-system/fulcio-server:80
 #   localhost:30100 → tuf-system/tuf-server:80
 #   localhost:39000 → pki/devsecops-demo-stepca:9000
+#   localhost:30800 → registry/registry-ui:80     (registry browser UI)
+#   localhost:30900 → registry/rekor-ui:8080       (Rekor Search UI)
 # =============================================================================
 set -euo pipefail
 
@@ -59,6 +61,23 @@ pf() {
     waited=$((waited + 5))
   done
 
+  # Wait for the Service to have at least one ready endpoint. `kubectl port-forward
+  # svc/...` attaches to a backing pod and dies immediately if that pod is not
+  # running (e.g. still pulling its image — "pod is not running. Current
+  # status=Pending"). Bounded; if no endpoint ever appears we warn and skip
+  # rather than hang the whole script (e.g. a UI whose image was never built).
+  local ep_wait=90
+  local ep_waited=0
+  while [ -z "$(kubectl get endpoints "$service" -n "$namespace" \
+      -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null)" ]; do
+    if [[ "$ep_waited" -ge "$ep_wait" ]]; then
+      fail "Service $namespace/$service has no ready endpoints after ${ep_wait}s — skipping port-forward"
+      return 0
+    fi
+    sleep 3
+    ep_waited=$((ep_waited + 3))
+  done
+
   kubectl port-forward "svc/$service" "$local_port:$remote_port" \
     -n "$namespace" \
     >/tmp/pf-${service}.log 2>&1 &
@@ -73,6 +92,11 @@ pf 30300 rekor-system   rekor-server      80    "Rekor"
 pf 30200 fulcio-system  fulcio-server     80    "Fulcio"
 pf 30100 tuf-system     tuf-server        80    "TUF mirror"
 pf 39000 pki            devsecops-demo-stepca 9000  "step-ca"
+
+# Demo web UIs (enabled by default; if you disable registryUi/rekorUi in values
+# the pf helper waits for the Service then skips it).
+pf 30800 registry       registry-ui       80    "Registry UI"
+pf 30900 registry       rekor-ui          8080  "Rekor Search UI"
 
 echo ""
 info "Port-forward logs: /tmp/pf-<service>.log"

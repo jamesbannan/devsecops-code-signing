@@ -1,0 +1,53 @@
+{{- if .Values.rekorUi.enabled }}
+{{- $repo := .Values.rekorUi.image.repository | default (printf "%s/demo/rekor-ui" .Values.global.registry) }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rekor-ui
+  namespace: {{ include "devsecops-demo.registryNamespace" . }}
+  labels:
+    {{- include "devsecops-demo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: rekor-ui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rekor-ui
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: rekor-ui
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: rekor-ui
+    spec:
+      containers:
+        - name: rekor-ui
+          image: "{{ $repo }}:{{ .Values.rekorUi.image.tag }}"
+          imagePullPolicy: {{ .Values.rekorUi.image.pullPolicy | default .Values.global.imagePullPolicy | default "IfNotPresent" }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            # nginx same-origin proxy target: the in-cluster rekor-server.
+            # The UI (built with NEXT_PUBLIC_REKOR_DEFAULT_DOMAIN=/rekor) calls
+            # /rekor/api/v1/... which nginx forwards here, so no CORS is needed.
+            - name: REKOR_UPSTREAM
+              value: {{ .Values.rekorUi.rekorUpstream | quote }}
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            {{- toYaml .Values.rekorUi.resources | nindent 12 }}
+{{- end }}
