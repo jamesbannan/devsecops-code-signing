@@ -3,9 +3,10 @@
 # aks-down.sh — Tear down the dev/test AKS cluster + ACR.
 # =============================================================================
 # Steps:
-#   1. Best-effort: helm uninstall the demo release
-#   2. terraform destroy (in infra/aks/)
-#   3. Remove chart/values-aks.local.yaml
+#   1. Stop any running port-forwards (/tmp/devsecops-pf.pids)
+#   2. Best-effort: helm uninstall the demo release
+#   3. terraform destroy (in infra/aks/)
+#   4. Remove chart/values-aks.local.yaml
 #
 # Set AUTO_APPROVE=true to skip the terraform destroy confirmation prompt.
 # =============================================================================
@@ -39,7 +40,22 @@ for bin in terraform; do
 done
 
 # -----------------------------------------------------------------------------
-# Step 1: best-effort helm uninstall (only if kubectl context is reachable)
+# Step 1: stop any running port-forwards (they point at a cluster we're deleting)
+# -----------------------------------------------------------------------------
+PID_FILE="/tmp/devsecops-pf.pids"
+if [ -f "$PID_FILE" ]; then
+  step "Stopping port-forwards"
+  while IFS= read -r pid; do
+    if kill "$pid" 2>/dev/null; then
+      info "Killed port-forward PID $pid"
+    fi
+  done < "$PID_FILE"
+  rm -f "$PID_FILE"
+fi
+rm -f /tmp/pf-*.log 2>/dev/null || true
+
+# -----------------------------------------------------------------------------
+# Step 2: best-effort helm uninstall (only if kubectl context is reachable)
 # -----------------------------------------------------------------------------
 if command -v helm >/dev/null 2>&1 && command -v kubectl >/dev/null 2>&1; then
   if kubectl cluster-info >/dev/null 2>&1; then
@@ -56,7 +72,7 @@ if command -v helm >/dev/null 2>&1 && command -v kubectl >/dev/null 2>&1; then
 fi
 
 # -----------------------------------------------------------------------------
-# Step 2: terraform destroy
+# Step 3: terraform destroy
 # -----------------------------------------------------------------------------
 [ -d "$INFRA_DIR" ] || fail "Terraform stack not found at $INFRA_DIR"
 
@@ -69,7 +85,7 @@ fi
 terraform -chdir="$INFRA_DIR" destroy "${TF_DESTROY_ARGS[@]}"
 
 # -----------------------------------------------------------------------------
-# Step 3: cleanup rendered values file
+# Step 4: cleanup rendered values file
 # -----------------------------------------------------------------------------
 if [ -f "$VALUES_LOCAL" ]; then
   step "Removing $VALUES_LOCAL"

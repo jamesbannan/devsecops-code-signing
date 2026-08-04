@@ -126,13 +126,18 @@ ok "Wrote $VALUES_LOCAL"
 header "Next steps"
 cat <<EOF
 
-  Cluster is ready. To install the demo stack:
+  Cluster is ready. To install the demo stack (install.sh auto-selects
+  $VALUES_LOCAL when the current context is AKS):
 
-    VALUES_FILE=$VALUES_LOCAL bash scripts/install.sh
+    bash scripts/install.sh
+    bash scripts/verify.sh
 
-  To build and push demo images to ACR:
+  To build and push the demo app image to ACR (needed by demos 2, 3 and 6):
 
-    bash scripts/build-and-push.sh
+    bash demos/demo-app/build-and-push.sh
+
+  install.sh builds and pushes the Rekor Search UI image for you; re-run
+  demos/rekor-ui/build-and-push.sh only if you need to rebuild it.
 
   To tear everything down:
 
