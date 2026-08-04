@@ -440,6 +440,141 @@ caffeinate -d &  # Prevents display sleep; kill it after the demo
 
 ---
 
+## 9. Demo script exits silently mid-step (cosign v3 output parsing)
+
+**Symptom:**
+```
+=== Step 2: Keyless signing — Fulcio issues the cert ===
+...
+$ cosign sign --fulcio-url ... --identity-token <token> ...
+# (the script just stops here — no [OK], no [FAIL], exit code 1)
+```
+The image is actually signed successfully, but the demo aborts immediately
+afterwards with no error message.
+
+**Cause:**
+cosign **v3** changed its signing output. It no longer prints
+`tlog entry created with index: N` (or `SCT`) on `cosign sign` / `cosign attest`
+— it only prints `Generating ephemeral keys… / Signing artifact… / Pushing
+signature to:`. The demo scripts run under `set -euo pipefail`, so a
+`grep 'index:'` (or `grep -E 'tlog|entry|SCT'`) that finds **no match** returns
+exit 1, `pipefail` propagates it, and `set -e` kills the script — right after a
+*successful* sign, which is why there is no obvious error.
+
+**Diagnosis:**
+```bash
+cosign version   # GitVersion: v3.x.x
+
+# Confirm the sign actually succeeded and the output no longer contains "index:":
+TOKEN=$(kubectl create token signing-sa -n workload --audience=sigstore --duration=10m)
+cosign sign --fulcio-url http://localhost:30200 --rekor-url http://localhost:30300 \
+  --identity-token "$TOKEN" --allow-insecure-registry --use-signing-config=false --yes \
+  localhost:30500/demo/app:latest
+# -> "Pushing signature to: ..." but no "tlog entry created with index: N"
+```
+
+**Fix:**
+The demo scripts read the tlog index from the **signature bundle** instead of
+the sign output, and guard every output-parsing `grep` with `|| true`:
+```bash
+# cosign v3: the tlog index lives in the bundle, not the sign output
+cosign download signature --allow-insecure-registry localhost:30500/demo/app:latest \
+  | jq -r '.verificationMaterial.tlogEntries[].logIndex'
+```
+If you write your own scripts against cosign v3, never grep the sign/attest
+stdout for `index:`/`tlog`/`SCT` under `set -e` without an `|| true` fallback.
+
+---
+
+## 10. `reset-demo.sh` helm upgrade fails — conflict with "kubectl-patch"
+
+**Symptom:**
+```
+=== Redeploying workload Jobs (helm upgrade) ===
+Error: UPGRADE FAILED: conflict occurred while applying object
+  /require-image-signature kyverno.io/v1, Kind=ClusterPolicy:
+  Apply failed with 2 conflicts: conflicts with "kubectl-patch" using kyverno.io/v1:
+  - .spec.rules
+  - .spec.validationFailureAction
+  [WARN] helm upgrade reported errors
+```
+
+**Cause:**
+Helm 4 uses **server-side apply** by default. Demo 5 runs
+`kubectl patch clusterpolicy require-image-signature …` to flip
+`validationFailureAction` to `Enforce` and `mutateDigest` to `true`. That makes
+the `kubectl-patch` field manager the owner of `.spec.rules` /
+`.spec.validationFailureAction`. When `reset-demo.sh` later runs `helm upgrade`,
+Helm's server-side apply refuses to overwrite fields owned by a different manager
+and fails with a conflict.
+
+**Diagnosis:**
+```bash
+helm version --short    # v4.x → server-side apply by default
+
+# See which field manager owns the policy's spec:
+kubectl get clusterpolicy require-image-signature --show-managed-fields -o json \
+  | jq '.metadata.managedFields[] | {manager, operation}'
+# A "kubectl-patch" entry with operation "Update" owning .spec.rules is the culprit.
+```
+
+**Fix:**
+`reset-demo.sh` already passes `--force-conflicts`, which tells server-side apply
+to take ownership and reset the policy to the chart defaults
+(`Audit`, `mutateDigest: false`) — exactly what a reset should do:
+```bash
+helm upgrade devsecops-demo chart/ -n pki --reuse-values --force-conflicts
+```
+If you hit this from a manual `helm upgrade` after running the demos, add
+`--force-conflicts` yourself, or reset the policy first with
+`bash scripts/reset-demo.sh`.
+
+> **macOS note:** these scripts run via `#!/usr/bin/env bash`, and macOS ships
+> bash 3.2 — so they avoid bash 4 syntax such as `${var,,}` (which raises
+> `bad substitution`). Lowercasing is done with `tr '[:upper:]' '[:lower:]'`.
+
+---
+
+## 11. Demo fails with "connection refused" on localhost:39000 after a reset
+
+**Symptom:**
+After `bash scripts/reset-demo.sh`, the next demo that talks to step-ca (e.g.
+Demo 2, Step 2) fails immediately:
+```
+=== Step 2: Request a short-lived signing certificate ===
+client GET https://localhost:39000/provisioners?limit=100 failed:
+  dial tcp [::1]:39000: connect: connection refused
+```
+
+**Cause:**
+The chart ships a `stepca-codesigning-config` Helm hook
+(`post-install,post-upgrade`) that `kubectl rollout restart`s the step-ca
+StatefulSet to apply the Code Signing EKU template. `reset-demo.sh` runs
+`helm upgrade`, which re-fires that hook, so **step-ca is restarted on every
+reset**. A `kubectl port-forward svc/devsecops-demo-stepca` does *not*
+auto-reconnect when its backing pod is replaced — the forward process dies and
+`localhost:39000` goes dark. (The other forwards target Deployments that aren't
+rolled, so they survive.)
+
+**Diagnosis:**
+```bash
+curl -sk -o /dev/null -w "%{http_code}\n" https://localhost:39000/health   # 000 = dead
+# The step-ca pod is newer than the port-forward:
+kubectl get statefulset devsecops-demo-stepca -n pki \
+  -o jsonpath='{.spec.template.metadata.annotations.kubectl\.kubernetes\.io/restartedAt}{"\n"}'
+```
+
+**Fix:**
+`reset-demo.sh` now re-establishes the port-forwards automatically after the
+`helm upgrade` (when `/tmp/devsecops-pf.pids` shows they were in use), so the
+next demo just works. If you hit a stale forward outside the reset flow, refresh
+them manually:
+```bash
+bash scripts/port-forward.sh   # or: bash scripts/resume.sh
+```
+
+---
+
 ## AKS-Specific Issues
 
 ### A1. `terraform apply` fails: VM SKU not allowed in region
