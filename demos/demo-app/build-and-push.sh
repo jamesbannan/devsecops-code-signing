@@ -139,20 +139,35 @@ else
 fi
 
 # --- Push ---
+# ACR blob uploads from a docker/podman VM occasionally die mid-transfer with
+# "write: broken pipe". A plain retry almost always succeeds, so don't let a
+# transient network blip fail the whole build during a live demo.
+push_with_retry() {
+  local tool="$1" image="$2" attempt=1 max="${PUSH_RETRIES:-4}"
+  while [ "$attempt" -le "$max" ]; do
+    if [ "$attempt" -eq 1 ]; then
+      cmd "$tool push $image"
+    else
+      info "Push attempt $attempt/$max (retrying after transient failure) ..."
+      sleep $(( (attempt - 1) * 3 ))
+    fi
+    if "$tool" push "$image"; then
+      return 0
+    fi
+    attempt=$(( attempt + 1 ))
+  done
+  return 1
+}
+
 header "Pushing image to registry"
 
 if [ "$CLUSTER_KIND" = "aks" ]; then
   # Direct push to ACR via docker/podman (already authenticated via az acr login)
-  case "$BUILD_TOOL" in
-    docker)
-      cmd "docker push $FULL_IMAGE"
-      docker push "$FULL_IMAGE"
-      ;;
-    podman)
-      cmd "podman push $FULL_IMAGE"
-      podman push "$FULL_IMAGE"
-      ;;
-  esac
+  push_with_retry "$BUILD_TOOL" "$FULL_IMAGE" || {
+    printf "\n  [ERROR] Push to %s failed after %s attempts.\n" \
+      "$FULL_IMAGE" "${PUSH_RETRIES:-4}"
+    exit 1
+  }
 else
   case "$BUILD_TOOL" in
     minikube)
