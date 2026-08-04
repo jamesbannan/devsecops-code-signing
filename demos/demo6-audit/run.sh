@@ -177,7 +177,9 @@ ATTEST_OUTPUT=$(cosign attest \
   "$IMAGE" 2>&1) && ATTEST_RC=0 || ATTEST_RC=$?
 
 if [ "$ATTEST_RC" -eq 0 ]; then
-  echo "$ATTEST_OUTPUT" | grep -E "tlog|entry|SCT" | head -3 | sed 's/^/  /'
+  # cosign v3 attest prints "Signing artifact..."; guard the grep so a no-match
+  # doesn't abort the demo under `set -euo pipefail`.
+  echo "$ATTEST_OUTPUT" | grep -E "Signing|Pushing|tlog|entry|SCT" | head -3 | sed 's/^/  /' || true
   ok "Provenance attestation created and logged in Rekor"
 else
   echo "$ATTEST_OUTPUT" | tail -5 | sed 's/^/  /'
@@ -221,9 +223,11 @@ cmd "cosign verify-attestation --type slsaprovenance \\"
 cmd "  --certificate-identity '$SA_IDENTITY' \\"
 cmd "  --certificate-oidc-issuer '$OIDC_ISSUER' $IMAGE"
 
+# cosign v3 embeds the Rekor inclusion proof in the attestation bundle, so tlog
+# existence is verified offline — no --rekor-url needed (it now only prints a
+# deprecation warning, "please use --bundle").
 VERIFY_OUTPUT=$(cosign verify-attestation \
   --type slsaprovenance \
-  --rekor-url "$REKOR_URL" \
   --certificate-identity "$SA_IDENTITY" \
   --certificate-oidc-issuer "$OIDC_ISSUER" \
   --allow-insecure-registry \
@@ -349,34 +353,55 @@ header "Step 6: CISO Report"
 # =============================================================================
 echo ""
 printf "${CYAN}${BOLD}"
-echo "╔══════════════════════════════════════════════════════════════════════╗"
-echo "║                    IMAGE SIGNING AUDIT REPORT                       ║"
-echo "╠══════════════════════════════════════════════════════════════════════╣"
-printf "║  Generated:    %-54s ║\n" "$BUILD_TIME"
-printf "║  Environment:  %-54s ║\n" "BSides Melbourne 2026 Demo"
-echo "╠══════════════════════════════════════════════════════════════════════╣"
-printf "║  Image:        %-54s ║\n" "$IMAGE"
-printf "║  Digest:       %-54s ║\n" "${IMAGE_DIGEST:0:48}"
-printf "║  Git SHA:      %-54s ║\n" "$GIT_SHA_FULL"
-echo "╠══════════════════════════════════════════════════════════════════════╣"
-echo "║  SIGNATURES                                                          ║"
-printf "║    Sigstore:       %-50s ║\n" "✓ Keyless signed (Fulcio + Rekor)"
-printf "║    Attestation:    %-50s ║\n" "✓ SLSA provenance attached"
-echo "╠══════════════════════════════════════════════════════════════════════╣"
-echo "║  SIGNING IDENTITY                                                    ║"
-printf "║    Issuer:         %-50s ║\n" "$OIDC_ISSUER"
-printf "║    Subject:        %-50s ║\n" "signing-sa (workload namespace)"
-printf "║    SAN URI:        %-50s ║\n" "$SA_IDENTITY"
-echo "╠══════════════════════════════════════════════════════════════════════╣"
-echo "║  TRANSPARENCY LOG                                                    ║"
-printf "║    Rekor URL:      %-50s ║\n" "$REKOR_URL"
-printf "║    Tree size:      %-50s ║\n" "$REKOR_SIZE entries (tamper-evident)"
-echo "╠══════════════════════════════════════════════════════════════════════╣"
-echo "║  POLICY COMPLIANCE                                                   ║"
-printf "║    ClusterPolicy:  %-50s ║\n" "require-image-signature"
-printf "║    PolicyReports:  %-50s ║\n" "$REPORT_COUNT entries"
-printf "║    Status:         %-50s ║\n" "✓ Compliant"
-echo "╚══════════════════════════════════════════════════════════════════════╝"
+
+# The box is drawn with helpers that pad by *character* count (${#s}), not by
+# printf's byte-based %-Ns. That keeps the right border aligned even when a row
+# contains a multi-byte glyph like ✓ (3 bytes, 1 display column), which used to
+# pull the border 2 columns left. Over-long values are truncated with an ellipsis
+# so they can never blow out the box.
+BW=76                                   # inner width between the ║ borders
+BAR=$(printf '═%.0s' $(seq 1 "$BW"))
+
+box_row() {                             # box_row "<text>" — pad/truncate to BW chars
+  local s="$1" len=${#1}
+  if [ "$len" -gt "$BW" ]; then
+    s="${s:0:$((BW - 1))}…"
+    len=$BW
+  fi
+  printf "║%s%*s║\n" "$s" "$((BW - len))" ""
+}
+box_kv2() { box_row "$(printf '  %-14s%s' "$1" "$2")"; }    # top section rows
+box_kv4() { box_row "$(printf '    %-16s%s' "$1" "$2")"; }  # rows inside a section
+
+printf "╔%s╗\n" "$BAR"
+box_row "$(printf '%*sIMAGE SIGNING AUDIT REPORT' 25 '')"
+printf "╠%s╣\n" "$BAR"
+box_kv2 "Generated:"   "$BUILD_TIME"
+box_kv2 "Environment:" "DevSecOps Code Signing Demo"
+printf "╠%s╣\n" "$BAR"
+box_kv2 "Image:"   "$IMAGE"
+box_kv2 "Digest:"  "${IMAGE_DIGEST:0:48}"
+box_kv2 "Git SHA:" "$GIT_SHA_FULL"
+printf "╠%s╣\n" "$BAR"
+box_row "  SIGNATURES"
+box_kv4 "Sigstore:"    "✓ Keyless signed (Fulcio + Rekor)"
+box_kv4 "Attestation:" "✓ SLSA provenance attached"
+printf "╠%s╣\n" "$BAR"
+box_row "  SIGNING IDENTITY"
+box_kv4 "Issuer:"  "$OIDC_ISSUER"
+box_kv4 "Subject:" "signing-sa (workload namespace)"
+box_row "    SAN URI:"
+box_row "      $SA_IDENTITY"
+printf "╠%s╣\n" "$BAR"
+box_row "  TRANSPARENCY LOG"
+box_kv4 "Rekor URL:" "$REKOR_URL"
+box_kv4 "Tree size:" "$REKOR_SIZE entries (tamper-evident)"
+printf "╠%s╣\n" "$BAR"
+box_row "  POLICY COMPLIANCE"
+box_kv4 "ClusterPolicy:" "require-image-signature"
+box_kv4 "PolicyReports:" "$REPORT_COUNT entries"
+box_kv4 "Status:"        "✓ Compliant"
+printf "╚%s╝\n" "$BAR"
 printf "${NC}\n"
 
 echo ""

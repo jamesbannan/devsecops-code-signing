@@ -79,7 +79,6 @@ cosign download attestation --allow-insecure-registry \
 ISSUER=${AKS_OIDC_ISSUER_URL:-https://kubernetes.default.svc}
 cosign verify-attestation \
   --type slsaprovenance \
-  --rekor-url "${REKOR_URL:-http://localhost:30300}" \
   --certificate-identity "https://kubernetes.io/namespaces/workload/serviceaccounts/signing-sa" \
   --certificate-oidc-issuer "$ISSUER" \
   --allow-insecure-registry --insecure-ignore-sct=true \
@@ -125,7 +124,8 @@ echo "RekorN:   $(curl -s ${REKOR_URL:-http://localhost:30300}/api/v1/log | jq -
 | Attestation referrer in registry | `cosign tree http://localhost:30500/demo/app:latest` — a **new** `via OCI referrer` line appears under the image digest after this demo | Azure Portal → ACR → **Repositories → demo/app** → click the image **digest** → **Referrers** tab — a new row appears with artifactType `application/vnd.dev.cosign.artifact.sbom.v1+json` (DSSE-wrapped SLSA predicate) |
 | Attestation manifest contents | `cosign download attestation http://localhost:30500/demo/app:latest \| jq -r .payload \| base64 -d \| jq` — DSSE envelope wrapping the in-toto predicate | ACR Portal → click the new referrer row → **Manifest** tab |
 | Rekor entry detail | <http://localhost:30300/api/v1/log/entries?logIndex=N> in a browser — look for `"kind": "intoto"` | Same via port-forward |
-| Rekor search UI (optional) | `docker run -p 3000:3000 sigstore/rekor-search-ui` pointed at `http://host.docker.internal:30300` — search by image digest | Same, pointed at the port-forwarded Rekor |
+| **Rekor Search UI** | Open <http://localhost:30900> (built-in, wired into the chart) — search by image **hash** (`sha256:…`) or signer **email/identity**. Needs `bash demos/rekor-ui/build-and-push.sh` once + port-forwards. | `kubectl port-forward svc/rekor-ui 30900:8080 -n registry`, then <http://localhost:30900> |
+| **Registry browser UI** | Open <http://localhost:30800> (built-in [joxit](https://github.com/Joxit/docker-registry-ui), wired into the chart) — browse `demo/app`, its tags, digests, and signature/attestation referrers | Azure Portal → ACR → **Repositories**, or `kubectl port-forward svc/registry-ui 30800:80 -n registry` |
 | Kyverno PolicyReports | Dashboard → ns `workload` → **Custom Resources → policyreports.wgpolicyk8s.io** (depends on dashboard CRD support) | Azure Portal does not surface CRDs in the GUI; use `kubectl` |
 | Image vuln scan (bonus) | n/a | Azure Portal → ACR → **Microsoft Defender → Recommendations** — if Defender for Containers is enabled, the new image gets a vuln scan within minutes; attach that to the audit report |
 | Container Insights audit | n/a | Azure Portal → AKS → **Monitoring → Logs** — KQL: `KubeEvents | where ObjectKind == "ClusterPolicy"` — see when policy changed |
@@ -143,6 +143,10 @@ echo "RekorN:   $(curl -s ${REKOR_URL:-http://localhost:30300}/api/v1/log | jq -
   `PolicyReports`) that match what you'd see in Rekor's UI and what `kubectl
   get policyreport` would report. Have both open in side-by-side terminals
   during the talk.
+- The report is a fixed-width box (78 columns) — give the terminal at least
+  that width before presenting so the right border stays flush. The box pads by
+  display column (not bytes), so the `✓` glyphs line up; the keyless **SAN URI**
+  identity is printed on its own line so the full SPIFFE-style value is visible.
 - The `predicateType` in the registry's attestation manifest is
   `https://slsa.dev/provenance/v0.2`. That's a **public standard URL** —
   unlike a proprietary attestation format, this is what GitHub Actions,
