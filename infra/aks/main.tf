@@ -51,7 +51,8 @@ resource "azurerm_kubernetes_cluster" "this" {
   oidc_issuer_enabled               = true
   workload_identity_enabled         = true
   role_based_access_control_enabled = true
-  sku_tier                          = "Free"
+  sku_tier                          = var.sku_tier
+  support_plan                      = var.support_plan
   tags                              = var.tags
 
   default_node_pool {
@@ -77,7 +78,11 @@ resource "azurerm_kubernetes_cluster" "this" {
   network_profile {
     network_plugin    = "kubenet"
     load_balancer_sku = "standard"
-    network_policy    = "calico"
+    # Must be null on AKSLongTermSupport clusters: LTS rejects the Calico addon
+    # with "LTSUnsupportedAddon". The chart renders no NetworkPolicy resources,
+    # so enforcement here is unused. Set to "calico" when moving back to a
+    # KubernetesOfficial version if you need it.
+    network_policy = var.network_policy
   }
 
   lifecycle {

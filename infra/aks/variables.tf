@@ -21,6 +21,35 @@ variable "kubernetes_version" {
   default     = "1.33"
 }
 
+variable "sku_tier" {
+  description = <<-EOT
+    AKS control-plane SKU tier. Must be "Premium" when kubernetes_version is a
+    Long Term Support release (1.33 and older are LTS-only as of Aug 2026).
+    "Free" or "Standard" only work on KubernetesOfficial versions (1.34+).
+  EOT
+  type        = string
+  default     = "Premium"
+}
+
+variable "support_plan" {
+  description = <<-EOT
+    "AKSLongTermSupport" (required for LTS versions, needs sku_tier = "Premium")
+    or "KubernetesOfficial" (community-supported versions, any tier).
+  EOT
+  type        = string
+  default     = "AKSLongTermSupport"
+}
+
+variable "network_policy" {
+  description = <<-EOT
+    Network policy engine ("calico", "azure") or null to disable. Must be null
+    when support_plan is "AKSLongTermSupport" — LTS does not support the Calico
+    addon. The demo chart creates no NetworkPolicy resources.
+  EOT
+  type        = string
+  default     = null
+}
+
 variable "tags" {
   description = "Tags applied to all resources."
   type        = map(string)
