@@ -16,6 +16,11 @@ NC='\033[0m'
 PASS_COUNT=0
 FAIL_COUNT=0
 WARN_COUNT=0
+SKIP_COUNT=0
+
+# Remember whether the caller supplied IMAGE before we apply a default, so the
+# AKS branch below can override it without clobbering an explicit choice.
+_image_was_set="${IMAGE+set}"
 
 REGISTRY="${REGISTRY:-localhost:30500}"
 REKOR_URL="${REKOR_URL:-http://localhost:30300}"
@@ -28,6 +33,13 @@ IMAGE="${IMAGE:-${REGISTRY}/demo/app:latest}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/_cluster-detect.sh" >/dev/null 2>&1 || true
+
+# On AKS the demo image lives in ACR, not the in-cluster registry mirror.
+# REGISTRY intentionally keeps pointing at the port-forwarded mirror (checks 5
+# and 6 exercise that), but the signing checks must look at the real image.
+if [ -z "$_image_was_set" ] && [ "${CLUSTER_KIND:-}" = "aks" ] && [ -n "${ACR_LOGIN_SERVER:-}" ]; then
+  IMAGE="${ACR_LOGIN_SERVER}/demo/app:latest"
+fi
 CLUSTER_KIND="${CLUSTER_KIND:-unknown}"
 
 header() { printf "\n${CYAN}=== %s ===${NC}\n" "$1"; }
@@ -35,6 +47,7 @@ chk()    { printf "  Check %2d: %-55s" "$1" "$2"; }
 pass()   { printf "${GREEN}[PASS]${NC}\n"; PASS_COUNT=$((PASS_COUNT + 1)); }
 fail()   { printf "${RED}[FAIL]${NC} %s\n" "${1:-}"; FAIL_COUNT=$((FAIL_COUNT + 1)); }
 warn()   { printf "${YELLOW}[WARN]${NC} %s\n" "${1:-}"; WARN_COUNT=$((WARN_COUNT + 1)); }
+skip()   { printf "${CYAN}[SKIP]${NC} %s\n" "${1:-}"; SKIP_COUNT=$((SKIP_COUNT + 1)); }
 
 header "DevSecOps Demo — Environment Verification"
 printf "  Registry: %s\n" "$REGISTRY"
@@ -276,17 +289,25 @@ POLICY_EXISTS=$(kubectl get clusterpolicy require-image-signature 2>/dev/null &&
 # =============================================================================
 header "End-to-end signing checks"
 chk 15 "Smallstep CA sign + verify round-trip"
-JOB_STATUS=$(kubectl get job signing-job-smallstep -n workload \
-  -o jsonpath='{.status.succeeded}' 2>/dev/null || echo "")
-[ "${JOB_STATUS:-0}" -ge 1 ] && pass || warn "Smallstep signing job not yet completed — run build-and-push.sh first"
+if ! kubectl get job signing-job-smallstep -n workload &>/dev/null; then
+  skip "in-cluster signing Job not deployed (disabled in values)"
+else
+  JOB_STATUS=$(kubectl get job signing-job-smallstep -n workload \
+    -o jsonpath='{.status.succeeded}' 2>/dev/null || echo "")
+  [ "${JOB_STATUS:-0}" -ge 1 ] && pass || warn "Smallstep signing job has not completed"
+fi
 
 # =============================================================================
 # Check 16: End-to-end Sigstore keyless round-trip
 # =============================================================================
 chk 16 "Sigstore keyless sign + verify round-trip"
-JOB_STATUS=$(kubectl get job signing-job-sigstore -n workload \
-  -o jsonpath='{.status.succeeded}' 2>/dev/null || echo "")
-[ "${JOB_STATUS:-0}" -ge 1 ] && pass || warn "Sigstore signing job not yet completed — run manually"
+if ! kubectl get job signing-job-sigstore -n workload &>/dev/null; then
+  skip "in-cluster signing Job not deployed (disabled in values)"
+else
+  JOB_STATUS=$(kubectl get job signing-job-sigstore -n workload \
+    -o jsonpath='{.status.succeeded}' 2>/dev/null || echo "")
+  [ "${JOB_STATUS:-0}" -ge 1 ] && pass || warn "Sigstore signing job has not completed"
+fi
 
 # =============================================================================
 # Check 17: Policy gate — unsigned image is audited/blocked by Kyverno
@@ -319,18 +340,19 @@ if cosign verify \
   SIGNED=true
   pass
 else
-  warn "Image not yet signed — run signing jobs first, then re-run verify.sh"
+  warn "Image not yet signed — run a signing demo (e.g. demos/demo3-sigstore/run.sh), then re-run verify.sh"
 fi
 
 # =============================================================================
 # Summary
 # =============================================================================
-TOTAL=$((PASS_COUNT + FAIL_COUNT + WARN_COUNT))
+TOTAL=$((PASS_COUNT + FAIL_COUNT + WARN_COUNT + SKIP_COUNT))
 header "Verification summary"
 printf "  Total checks:  %d\n" "$TOTAL"
 printf "  ${GREEN}Passed:${NC}        %d\n" "$PASS_COUNT"
 printf "  ${YELLOW}Warnings:${NC}      %d\n" "$WARN_COUNT"
 printf "  ${RED}Failed:${NC}        %d\n" "$FAIL_COUNT"
+[ "$SKIP_COUNT" -gt 0 ] && printf "  ${CYAN}Skipped:${NC}       %d (not applicable to this cluster)\n" "$SKIP_COUNT"
 echo ""
 
 if [ "$FAIL_COUNT" -eq 0 ] && [ "$WARN_COUNT" -eq 0 ]; then
