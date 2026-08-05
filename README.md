@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/images/banner.png" alt="Zero-Friction DevSecOps — Automated Code Signing Done Right" width="100%">
+</p>
+
 # DevSecOps Code Signing Demo
 
 **Talk:** "Zero-Friction DevSecOps: Automated Code Signing Done Right"
