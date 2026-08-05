@@ -9,3 +9,6 @@ node_modules/
 
 # Local scratch / source assets not part of the repo
 temp/
+
+# Presentation deck — kept local, deliberately not published with the repo
+slides/
