@@ -52,7 +52,15 @@ COMPONENTS=(
   "tuf-system|TUF|Signed root of trust for the whole sigstore stack"
   "registry|registry|OCI registry holding images + signatures + attestations"
   "policy|Kyverno|Admission controller enforcing signature policy"
+  "workload|workload|Where the demo apps run — the thing being protected"
 )
+
+# Derive the namespace filter from COMPONENTS so the two can never drift apart.
+DEMO_NAMESPACES=()
+for entry in "${COMPONENTS[@]}"; do
+  DEMO_NAMESPACES+=("${entry%%|*}")
+done
+NS_RE="$(IFS='|'; printf '%s' "${DEMO_NAMESPACES[*]}")"
 
 hr() { printf "${DIM}%s${NC}\n" "────────────────────────────────────────────────────────────────────────"; }
 section() { printf "\n${CYAN}${BOLD}» %s${NC}\n" "$1"; hr; }
@@ -92,12 +100,17 @@ pause
 # 1. Headline shot — every pod that powers the demo
 # -----------------------------------------------------------------------------
 section "1. The whole stack at a glance"
-note "Filtered to demo namespaces — kube-system noise hidden."
-cmd "kubectl get pods -A | grep -Ev 'kube-system|local-path|metrics-server|calico-system|tigera-operator'"
+note "Filtered to the demo's own namespaces — platform noise hidden."
+# An allow-list, not a block-list. The previous version excluded calico-system
+# and tigera-operator, which no longer exist (the AKS stack dropped the Calico
+# addon — LTS clusters reject it), and it silently leaked whatever new
+# namespaces a platform happened to add. Listing what we own is stable across
+# both minikube and AKS.
+cmd "kubectl get pods -A | grep -E 'NAMESPACE|^($NS_RE) '"
 echo
-kubectl get pods -A 2>/dev/null | \
-  grep -Ev 'kube-system|local-path|metrics-server|calico-system|tigera-operator' || \
-  printf "${YELLOW}  cluster unreachable — run install.sh first${NC}\n"
+if ! kubectl get pods -A 2>/dev/null | grep -E "^NAMESPACE|^(${NS_RE})[[:space:]]"; then
+  printf "${YELLOW}  no demo pods found — is the cluster up? run install.sh first${NC}\n"
+fi
 pause
 
 # -----------------------------------------------------------------------------
@@ -108,8 +121,13 @@ for entry in "${COMPONENTS[@]}"; do
   IFS='|' read -r ns label desc <<< "$entry"
   printf "\n${GREEN}${BOLD}▸ %-16s${NC} ${DIM}— %s${NC}\n" "$label" "$desc"
   if kubectl get ns "$ns" &>/dev/null; then
-    kubectl get pods -n "$ns" --no-headers 2>/dev/null | \
-      awk '{printf "    %-50s %-10s %s\n", $1, $3, $5}' || true
+    pods="$(kubectl get pods -n "$ns" --no-headers 2>/dev/null || true)"
+    if [[ -n "$pods" ]]; then
+      awk '{printf "    %-50s %-10s %s\n", $1, $3, $5}' <<< "$pods"
+    else
+      # `workload` is legitimately empty until the demos have been run.
+      printf "    ${DIM}(no pods yet)${NC}\n"
+    fi
   else
     printf "    ${DIM}(namespace %s not present)${NC}\n" "$ns"
   fi
@@ -130,6 +148,9 @@ if require cosign && require crane; then
     echo
     cosign tree "$IMAGE" 2>&1 || \
       printf "${YELLOW}  cosign tree failed — has build-and-push.sh been run?${NC}\n"
+    # cosign's "no artifacts found" message has no trailing newline, which runs
+    # the closing rule into it.
+    echo
   else
     printf "${YELLOW}  Image not found in registry. Run:${NC}\n"
     printf "    ${CYAN}bash demos/demo-app/build-and-push.sh${NC}\n"
