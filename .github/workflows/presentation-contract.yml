@@ -12,12 +12,14 @@ on:
       - 'demos/**'
       - 'docs/architecture.md'
       - 'scripts/check-presentation.sh'
+      - '.github/workflows/presentation-contract.yml'
   pull_request:
     paths:
       - '.presentation/**'
       - 'demos/**'
       - 'docs/architecture.md'
       - 'scripts/check-presentation.sh'
+      - '.github/workflows/presentation-contract.yml'
   workflow_dispatch:
 
 permissions:
@@ -27,9 +29,9 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
