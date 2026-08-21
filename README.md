@@ -13,6 +13,11 @@ Registry v2, and Kyverno policy enforcement — running on a **local minikube cl
 on **Azure Kubernetes Service** (provisioned end-to-end via Terraform). All six demo
 scripts auto-detect the target and behave identically.
 
+The slides for the talk live in
+[`jamesbannan/presentations`](https://github.com/jamesbannan/presentations). They are
+built from [`.presentation/facts.yaml`](.presentation/README.md) in this repository, so
+the deck tracks the demos rather than restating them.
+
 ---
 
 ## Quickstart — Local minikube (~20 minutes)

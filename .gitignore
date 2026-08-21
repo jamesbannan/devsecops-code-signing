@@ -10,5 +10,7 @@ node_modules/
 # Local scratch / source assets not part of the repo
 temp/
 
-# Presentation deck — kept local, deliberately not published with the repo
+# Legacy local deck. The talk now lives in jamesbannan/presentations and is built
+# from .presentation/facts.yaml; this entry only keeps a stale local slides/ folder
+# from showing up as untracked. Safe to delete once that folder is gone.
 slides/

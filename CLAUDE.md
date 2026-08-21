@@ -31,6 +31,9 @@ AKS with workload identity + OIDC).
 - `infra/aks/` — Terraform stack (local state); inlines the AVM `ptn-aks-dev` pattern
   to work around its hardcoded `Standard_DS2_v2` and `basic` load-balancer SKU
 - `demos/demo[1-6]-*/run.sh` — idempotent demo scripts that auto-detect the cluster
+- `.presentation/facts.yaml` — structured facts published for slide decks; consumed by
+  `jamesbannan/presentations` (deck `zero-friction-devsecops`). Guarded by
+  `scripts/check-presentation.sh` in CI — see `.presentation/README.md`
 - `docs/architecture.md`, `docs/troubleshooting.md` — operator-facing docs
 - `INSTRUCTIONS.md` — original build specification (retained as a design record)
 
@@ -57,6 +60,10 @@ FORCE=true PURGE_CRDS=true bash scripts/cleanup.sh   # non-interactive, deep cle
 
 ## Conventions
 
+- The talk's slides live in `jamesbannan/presentations`, not here. This repo publishes
+  `.presentation/facts.yaml` and the deck reads it; when a demo's steps or the
+  architecture change, update that file in the same commit and run
+  `bash scripts/check-presentation.sh`.
 - Cluster-aware behaviour lives in `scripts/_cluster-detect.sh`; scripts and demos
   should source it rather than re-implementing detection.
 - Fulcio config goes through `scaffold.fulcio.config.contents` (a complete JSON blob

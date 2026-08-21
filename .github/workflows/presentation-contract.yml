@@ -1,0 +1,38 @@
+name: presentation-contract
+
+# .presentation/facts.yaml is consumed by jamesbannan/presentations to build the
+# "Zero-Friction DevSecOps" talk. Nothing in this repository fails if it drifts,
+# so check it here — a renamed or deleted demo should break the build, not the talk.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.presentation/**'
+      - 'demos/**'
+      - 'docs/architecture.md'
+      - 'scripts/check-presentation.sh'
+  pull_request:
+    paths:
+      - '.presentation/**'
+      - 'demos/**'
+      - 'docs/architecture.md'
+      - 'scripts/check-presentation.sh'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - run: pip install pyyaml
+
+      - run: bash scripts/check-presentation.sh
